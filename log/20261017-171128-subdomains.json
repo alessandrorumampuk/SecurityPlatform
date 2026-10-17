@@ -1,0 +1,10 @@
+{
+  "generated_by": "find_subdomains.py",
+  "domain": "zonetransfer.me",
+  "scanned_at": "2026-10-17T17:11:28",
+  "resolver": "1.1.1.1",
+  "wildcard_ips": [],
+  "total_found": 0,
+  "resolving": 0,
+  "subdomains": []
+}
