@@ -13,6 +13,10 @@ discovered from first-party evidence only:
                     ``*.domain`` references out of it
     4. MUTATION  -- env-prefix/suffix permutations on discovered names
                     (dev-, staging-, -api, ...) then resolve them
+    5. CT        -- OPTIONAL (--ct): Certificate Transparency identities
+                    via crt.sh, the same Postgres-mirrored CT index that
+                    subfinder/amass use. Third-party data -- off by
+                    default so the tool stays zero-API.
 
 Wildcard DNS is detected up front (random labels) so wildcard answers are
 flagged instead of silently inflating results.
@@ -287,6 +291,181 @@ def scrape(domain: str, seeds, sub_re, max_pages=40):
 
 
 # --------------------------------------------------------------------------
+# Certificate Transparency via crt.sh (OPTIONAL -- third-party data API)
+#
+# crt.sh doesn't scan anything itself -- it is Sectigo's public frontend to
+# "certwatch", a PostgreSQL mirror that continuously ingests every public
+# CT log (RFC 6962). It exposes the SAME database twice:
+#
+#   1. PostgreSQL wire protocol:  psql -h crt.sh -p 5432 -U guest certwatch
+#      -> replicated below in raw sockets (no psql/psycopg2 needed), running
+#         crt.sh's own reversed-index query form
+#   2. HTTP JSON:  https://crt.sh/?q=%25.<domain>&output=json
+#      -> used as fallback when outbound :5432 is filtered
+#
+# --------------------------------------------------------------------------
+
+# crt.sh's indexed query form (verified against live pg_indexes):
+#   c_identities = GIN index on identities(certificate)  [tsvector of
+#   all cert names]. x509_altnames() is certwatch's SRF that returns
+#   each SAN/CN as a row. certificate_identity is deprecated upstream;
+#   a plain ILIKE '%.domain' on *_and_identities full-scans billions of
+#   rows, so we MUST go through the FTS index exactly like crt.sh does.
+_CRT_SQL = (
+    "SELECT DISTINCT n FROM ("
+    "  SELECT x509_altnames(certificate) AS n"
+    "    FROM certificate"
+    "    WHERE identities(certificate) @@ phraseto_tsquery('%s')"
+    "  UNION"
+    "  SELECT x509_commonname(certificate) AS n"
+    "    FROM certificate"
+    "    WHERE identities(certificate) @@ phraseto_tsquery('%s')"
+    ") t WHERE n IS NOT NULL LIMIT 200000"
+)
+
+
+def _pg_recv(sock):
+    t = _recv_exact(sock, 1)
+    if not t:
+        raise OSError("pg: connection closed")
+    (ln,) = struct.unpack("!I", _recv_exact(sock, 4))
+    return t, _recv_exact(sock, ln - 4)
+
+
+def _pg_error(body: bytes) -> str:
+    """ErrorResponse fields: repeated [type byte][cstr], terminated by \\0."""
+    fields, off = {}, 0
+    while off < len(body) and body[off]:
+        code = chr(body[off]); off += 1
+        end = body.index(b"\x00", off)
+        fields[code] = body[off:end].decode("utf-8", "replace")
+        off = end + 1
+    return f"{fields.get('C', '')} {fields.get('M', 'unknown')}".strip()
+
+
+def _pg_query(host, port, db, user, sql, timeout=120):
+    """Minimal PostgreSQL v3 simple-query client (trust/cleartext auth)."""
+    s = socket.create_connection((host, port), timeout)
+    s.settimeout(timeout)
+    try:
+        params = b"user\x00%s\x00database\x00%s\x00\x00" % (
+            user.encode(), db.encode())
+        s.sendall(struct.pack("!II", 8 + len(params), 196608) + params)
+        rows = []
+        while True:
+            t, body = _pg_recv(s)
+            if t == b"R":                            # authentication request
+                code = struct.unpack("!I", body[:4])[0]
+                if code == 0:
+                    continue                         # AuthenticationOk
+                if code == 3:                        # cleartext password
+                    pw = b"\x00"                     # guest: empty password
+                    s.sendall(b"p" + struct.pack("!I", 4 + len(pw)) + pw)
+                    continue
+                raise OSError(f"pg: unsupported auth method {code}")
+            elif t == b"E":
+                raise OSError("pg: " + _pg_error(body))
+            elif t == b"Z":                          # ReadyForQuery
+                q = sql.encode() + b"\x00"
+                s.sendall(b"Q" + struct.pack("!I", 4 + len(q)) + q)
+                while True:
+                    t, body = _pg_recv(s)
+                    if t == b"D":                    # DataRow
+                        n = struct.unpack("!H", body[:2])[0]
+                        off, row = 2, []
+                        for _ in range(n):
+                            ln = struct.unpack("!i", body[off:off + 4])[0]
+                            off += 4
+                            row.append(None if ln < 0 else
+                                       body[off:off + ln].decode(
+                                           "utf-8", "replace"))
+                            off += max(ln, 0)
+                        rows.append(row)
+                    elif t == b"E":
+                        raise OSError("pg: " + _pg_error(body))
+                    elif t == b"Z":
+                        return rows
+                    # T=RowDescription, C=CommandComplete, N=Notice: skip
+            # S=ParameterStatus, K=BackendKeyData, N=NoticeResponse: skip
+    finally:
+        s.close()
+
+
+def _ct_via_postgres(domain: str, timeout=120, retries=8):
+    """Same query crt.sh runs, against the same certwatch database.
+    crt.sh caps guest connections via pgbouncer -- retry the pool."""
+    last = None
+    import time
+    for attempt in range(retries):
+        try:
+            rows = _pg_query("crt.sh", 5432, "certwatch", "guest",
+                             _CRT_SQL % (domain, domain), timeout)
+            return [r[0] for r in rows if r and r[0]]
+        except OSError as e:
+            last = e
+            if "max_client_conn" not in str(e) and "no more connections" \
+                    not in str(e):
+                raise
+            print(f"[subdomain] crt.sh pg pool busy, retry "
+                  f"{attempt + 1}/{retries}")
+            time.sleep(3)
+    raise last
+
+
+def _ct_via_http(domain: str, timeout=60, retries=3):
+    """crt.sh JSON endpoint fallback: ?q=%25.domain&output=json"""
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    for attempt in range(retries):
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                entries = json.loads(r.read(20_000_000)
+                                     .decode("utf-8", "replace"))
+            out = []
+            for e in entries:
+                out.append(e.get("name_value") or "")
+                out.append(e.get("common_name") or "")
+            return out
+        except Exception as e:
+            print(f"[subdomain] crt.sh http attempt {attempt + 1}: "
+                  f"{str(e)[:80]}")
+    return []
+
+
+def ct_subdomains(domain: str, timeout=60):
+    """Every dNSName identity ever logged for *.domain, crt.sh-style.
+
+    Returns (names, wildcard_zones, raw_count). A '*.foo.domain' cert is
+    evidence the zone foo.domain exists -- recorded, but never expanded
+    into invented hostnames.
+    """
+    raw, via = [], "postgres"
+    try:
+        raw = _ct_via_postgres(domain)
+    except (OSError, socket.timeout) as e:
+        print(f"[subdomain] crt.sh postgres failed ({str(e)[:60]}), "
+              f"falling back to https JSON")
+        via = "http"
+        raw = _ct_via_http(domain)
+
+    names, wildcards = set(), set()
+    for blob in raw:
+        for n in blob.split("\n"):
+            n = n.strip().lower().rstrip(".")
+            if not n:
+                continue
+            if n.startswith("*."):
+                base = n[2:]
+                if base == domain or base.endswith("." + domain):
+                    wildcards.add(base)
+                continue
+            if n == domain or n.endswith("." + domain):
+                names.add(n)
+    print(f"[subdomain] crt.sh ({via}): {len(raw)} raw identities")
+    return names, wildcards, len(raw)
+
+
+# --------------------------------------------------------------------------
 # Mutations (altdns-style) on discovered first labels
 # --------------------------------------------------------------------------
 
@@ -375,6 +554,10 @@ def main():
     ap.add_argument("--no-bruteforce", action="store_true")
     ap.add_argument("--no-scrape", action="store_true")
     ap.add_argument("--no-mutate", action="store_true")
+    ap.add_argument("--ct", action="store_true",
+                    help="Query the crt.sh CT index (certwatch Postgres, "
+                         "JSON fallback). THIRD-PARTY data -- off by "
+                         "default so the tool stays zero-API.")
     ap.add_argument("--no-probe", action="store_true",
                     help="Skip the HTTP liveness/title probe")
     ap.add_argument("--timeout", type=int, default=6)
@@ -454,7 +637,18 @@ def main():
             for n in more:
                 add(n, "scrape")
 
-    # -- 4. mutations -----------------------------------------------------------
+    # -- 4. Certificate Transparency (optional -- crt.sh) ------------------------
+    ct_wildcards = set()
+    if args.ct:
+        names, ct_wildcards, _ = ct_subdomains(domain,
+                                               timeout=max(args.timeout * 10,
+                                                           60))
+        for n in names:
+            add(n, "ct")
+        for n in ct_wildcards:
+            add(n, "ct_wildcard")
+
+    # -- 5. mutations -----------------------------------------------------------
     if not args.no_mutate and found:
         muts = mutations(set(found), domain)
         print(f"[subdomain] mutations: {len(muts)} permutations")
@@ -501,6 +695,7 @@ def main():
         "scanned_at": datetime.now().isoformat(timespec="seconds"),
         "resolver": resolver,
         "wildcard_ips": sorted(wild),
+        "ct_wildcard_zones": sorted(ct_wildcards) if args.ct else [],
         "total_found": len(records),
         "resolving": len(live),
         "subdomains": records,

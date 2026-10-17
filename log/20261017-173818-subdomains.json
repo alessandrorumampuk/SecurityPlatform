@@ -1,0 +1,24 @@
+{
+  "generated_by": "find_subdomains.py",
+  "domain": "zonetransfer.me",
+  "scanned_at": "2026-10-17T17:38:18",
+  "resolver": "1.1.1.1",
+  "wildcard_ips": [],
+  "ct_wildcard_zones": [],
+  "total_found": 1,
+  "resolving": 1,
+  "subdomains": [
+    {
+      "host": "www.zonetransfer.me",
+      "ips": [
+        "5.196.105.14"
+      ],
+      "resolves": true,
+      "wildcard_match": false,
+      "sources": [
+        "ct"
+      ],
+      "http": {}
+    }
+  ]
+}
