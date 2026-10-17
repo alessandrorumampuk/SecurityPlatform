@@ -1,0 +1,17 @@
+{
+  "url": "https://0a9100dd0424e039822d4721007500cf.web-security-academy.net/",
+  "targets": [
+    {
+      "type": "link_param",
+      "template": "https://0a9100dd0424e039822d4721007500cf.web-security-academy.net/post?postId={xss_testing}",
+      "param": "postId"
+    },
+    {
+      "type": "get_form",
+      "template": "https://0a9100dd0424e039822d4721007500cf.web-security-academy.net/?search={xss_testing}",
+      "param": "search"
+    }
+  ],
+  "post_forms": [],
+  "target_count": 2
+}

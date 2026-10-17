@@ -8,6 +8,7 @@ import string
 import json
 import argparse
 import sys
+import base64
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -120,25 +121,146 @@ def send_curl(url):
         return f"[CURL_ERROR] {e}"
 
 
-def send_probe(target_url, items, vuln_name, kind):
+# Injected before any page script runs (add_init_script): record which DOM
+# sinks receive what string, and which alert-family calls actually fire.
+# __sinks captures the RAW sink argument — the honest post-decode value,
+# free of DOM serialization artifacts (a '>' written into text re-saves
+# as '&gt;' in innerHTML, but the sink arg keeps '>').
+RENDER_HOOK_JS = """
+window.__sinks = [];
+window.__fired = [];
+try {
+  const rec = (n, a) => { try { window.__sinks.push([n, String(a).slice(0, 2000)]); } catch (e) {} };
+  const _dw = document.write.bind(document);
+  document.write = s => { rec("document.write", s); return _dw(s); };
+  const _dwl = document.writeln.bind(document);
+  document.writeln = s => { rec("document.writeln", s); return _dwl(s); };
+  for (const [proto, prop, label] of [
+      [Element.prototype, "innerHTML", "innerHTML"],
+      [Element.prototype, "outerHTML", "outerHTML"],
+      [HTMLIFrameElement.prototype, "srcdoc", "srcdoc"]]) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      if (d && d.set) {
+        Object.defineProperty(proto, prop, {
+          configurable: true, enumerable: d.enumerable,
+          get: d.get ? function () { return d.get.call(this); } : undefined,
+          set: function (v) { rec(label, v); return d.set.call(this, v); }
+        });
+      }
+    } catch (e) {}
+  }
+  try {
+    const _iah = Element.prototype.insertAdjacentHTML;
+    Element.prototype.insertAdjacentHTML = function (p, v) {
+      rec("insertAdjacentHTML", v); return _iah.call(this, p, v);
+    };
+  } catch (e) {}
+  try {
+    const _rcf = Range.prototype.createContextualFragment;
+    Range.prototype.createContextualFragment = function (v) {
+      rec("createContextualFragment", v); return _rcf.call(this, v);
+    };
+  } catch (e) {}
+  try {
+    const _sa = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (n, v) {
+      if (/^on/i.test(String(n))) rec("setAttribute:" + n, v);
+      return _sa.call(this, n, v);
+    };
+  } catch (e) {}
+  const _ev = window.eval;
+  window.eval = s => { rec("eval", s); return _ev(s); };
+  for (const t of ["setTimeout", "setInterval"]) {
+    try {
+      const orig = window[t];
+      window[t] = (f, ms, ...r) => typeof f === "string"
+        ? (rec(t + "(string)", f), orig(f, ms, ...r)) : orig(f, ms, ...r);
+    } catch (e) {}
+  }
+  try {
+    const _Fn = window.Function;
+    window.Function = function (...a) {
+      rec("Function", a.join(";")); return _Fn.apply(this, a);
+    };
+    window.Function.prototype = _Fn.prototype;
+  } catch (e) {}
+  for (const t of ["assign", "replace"]) {
+    try {
+      const orig = location[t].bind(location);
+      location[t] = u => { rec("location." + t, u); return orig(u); };
+    } catch (e) {}
+  }
+  try {
+    const _wo = window.open;
+    window.open = (u, n, f) => { rec("window.open", u); return _wo(u, n, f); };
+  } catch (e) {}
+  for (const n of ["alert", "confirm", "prompt", "print"]) {
+    window[n] = a => { window.__fired.push(n + "(" + String(a === undefined ? "" : a) + ")"); return true; };
+  }
+} catch (e) {}
+"""
+
+
+def fetch_rendered(url, timeout_ms=15000):
+    """Render url in headless chromium; return (serialized_dom, meta).
+
+    meta = {"sinks": [[sink_name, raw_arg], ...], "fired": [alert(1), ...]}
+    Requires playwright + a chromium build (`playwright install chromium`).
+    """
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.add_init_script(RENDER_HOOK_JS)
+            page.goto(url, timeout=timeout_ms)
+            page.wait_for_timeout(500)  # let deferred/async sinks fire
+            html = page.content()
+            meta = page.evaluate(
+                "({sinks: window.__sinks || [], fired: window.__fired || []})")
+        finally:
+            browser.close()
+    return html, meta
+
+
+def send_probe(target_url, items, vuln_name, kind, render=False):
     input_str = MARKER_START + SEPARATOR.join(v for _, v in items) + MARKER_END
     print(f"{kind}: {input_str}")
     encoded = urllib.parse.quote(input_str, safe="")
     url = target_url.replace(PLACEHOLDER, encoded)
     print(f"URL:   {url}")
-    response = send_curl(url)
-    print(f"Response length: {len(response)}")
+    rmeta = {"sinks": [], "fired": []}
+    if render:
+        try:
+            response, rmeta = fetch_rendered(url)
+        except Exception as e:
+            print(f"[RENDER_ERROR] {e}")
+            print("hint: pip install playwright && playwright install chromium")
+            return
+        print(f"Rendered DOM: {len(response)} chars | "
+              f"sinks: {sorted({n for n, _ in rmeta['sinks']}) or 'none'} | "
+              f"fired: {rmeta['fired'] or 'none'}")
+    else:
+        response = send_curl(url)
+        print(f"Response length: {len(response)}")
 
     html_file = new_log_path(vuln_name, "html")
     with open(html_file, "w") as f:
         f.write(f"<!-- generated_by: send_payloads.py -->\n")
         f.write(f"<!-- generated_at: {datetime.now().isoformat()} -->\n")
+        f.write(f"<!-- probe_mode: {'render' if render else 'curl'} -->\n")
         f.write(f"<!-- input_sent: {input_str} -->\n")
         f.write(f"<!-- separator: {SEPARATOR} -->\n")
         f.write(f"<!-- items_json: {json.dumps(items)} -->\n")
         f.write(f"<!-- {kind.lower()}_names: {SEPARATOR.join(n for n, _ in items)} -->\n")
         f.write(f"<!-- url: {url} -->\n")
         f.write(f"<!-- response_length: {len(response)} -->\n")
+        if render:
+            sinks_b64 = base64.b64encode(
+                json.dumps(rmeta["sinks"]).encode()).decode()
+            f.write(f"<!-- sinks_b64: {sinks_b64} -->\n")
+            f.write(f"<!-- fired_json: {json.dumps(rmeta['fired'])} -->\n")
         f.write(response)
     print(f"Saved: {html_file}\n")
 
@@ -194,6 +316,11 @@ def main():
                         help="escalation probe: send each character alone "
                              "testing1<c>testing2 to pinpoint which char trips "
                              "the filter (saved as *-xss_isolation.json)")
+    parser.add_argument("--render", action="store_true",
+                        help="fetch via headless chromium instead of curl: "
+                             "finds DOM-only sinks (document.write, innerHTML, "
+                             "eval) whose reflection never reaches the raw "
+                             "response; hooked sinks are recorded in the log")
     args = parser.parse_args()
 
     target_url = args.url
@@ -220,11 +347,11 @@ def main():
     print()
 
     # Probe 1: character fingerprint (Layer A) -> *-xss.html
-    send_probe(target_url, CHARACTERS, "xss", "Characters")
+    send_probe(target_url, CHARACTERS, "xss", "Characters", render=args.render)
 
     # Probe 2: keyword fingerprint (Layer B/C) -> *-xss_keywords.html
     if args.probe2:
-        send_probe(target_url, kw_items, "xss_keywords", "Keywords")
+        send_probe(target_url, kw_items, "xss_keywords", "Keywords", render=args.render)
 
 
 if __name__ == "__main__":

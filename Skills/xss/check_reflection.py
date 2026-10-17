@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import argparse
+import base64
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,6 +36,44 @@ def parse_meta(content):
 
 def strip_html_comments(content):
     return re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+
+
+# Parenthetical maps each DOM sink to the parse context its argument lands
+# in, so CONTEXT_MAP in recommend_payload.py normalizes it for free:
+#   "dom sink: document.write (html body)"      -> html
+#   "dom sink: eval (javascript raw)"           -> js_raw
+DOM_SINK_CTX = {
+    "document.write": "dom sink: document.write (html body)",
+    "document.writeln": "dom sink: document.writeln (html body)",
+    "innerHTML": "dom sink: innerHTML (html body)",
+    "eval": "dom sink: eval (javascript raw)",
+    "setTimeout(string)": "dom sink: setTimeout(string) (javascript raw)",
+}
+
+# DOM plumbing hint: page scripts read a location.*/document.* source AND
+# call a DOM sink -> worth a render probe even when a server reflection
+# exists (the sink path never reaches the raw response body). List follows
+# the canonical source/sink sets (PortSwigger / OWASP DOM-XSS cheat sheets).
+_DOM_SRC_RE = re.compile(
+    r"location\.(?:search|hash|href|pathname|host(?:name)?|port|protocol)\b"
+    r"|document\.(?:URL|URLUnencoded|documentURI|baseURI|referrer|cookie)\b"
+    r"|window\.name\b|localStorage|sessionStorage"
+    r"|event\.data\b|onmessage\b|addEventListener\s*\(\s*['\"]message")
+_DOM_SINK_RE = re.compile(
+    r"document\.(?:write|writeln|open)\b|\.(?:inner|outer)HTML\b"
+    r"|insertAdjacentHTML\b|createContextualFragment\b|\.srcdoc\b"
+    r"|\beval\s*\(|new\s+Function\b|set(?:Timeout|Interval)\s*\(\s*['\"]"
+    r"|location\.(?:assign|replace)\s*\(|\bwindow\.open\s*\(|\.location\s*="
+    r"|setAttribute\s*\(\s*['\"]on\w+"
+    r"|\$\.(?:parseHTML|globalEval)\s*\("
+    r"|\.(?:html|append|prepend|after|before|replaceWith|replaceAll"
+    r"|insertAfter|insertBefore|wrap(?:Inner|All)?)\s*\(")
+# sinks whose argument is executed as JavaScript, not parsed as markup
+_DOM_JS_SINKS = ("eval", "setTimeout(string)", "setInterval(string)",
+                 "Function")
+# navigation sinks: the argument is a URL — javascript: scheme executes
+_DOM_URL_SINKS = ("location.assign", "location.replace", "window.open",
+                  "location")
 
 
 def items_from_meta(meta, kind):
@@ -195,18 +234,50 @@ def main():
 
     meta = parse_meta(content)
     input_str = meta.get("input_sent", "")
+    probe_mode = meta.get("probe_mode", "curl")
+
+    sinks = []
+    if meta.get("sinks_b64"):
+        try:
+            sinks = json.loads(base64.b64decode(meta["sinks_b64"])
+                               .decode("utf-8", "replace"))
+        except Exception:
+            sinks = []
+    if sinks:
+        print(f"DOM sinks observed: {', '.join(sorted({n for n, _ in sinks}))}")
 
     items = items_from_meta(meta, kind)
     print(f"Items: {len(items)} ({'items_json from log' if meta.get('items_json') else 'static list fallback'})")
 
     response_body = strip_html_comments(content)
+    dom_hint = bool(_DOM_SRC_RE.search(response_body)
+                    and _DOM_SINK_RE.search(response_body))
+    if dom_hint:
+        print("DOM plumbing detected: page scripts read a location.* source "
+              "and call a DOM sink")
+
     reflected_matches, refl_positions = extract_reflected_all(response_body)
+
+    # DOM-sink surfaces: marker inside a sink ARGUMENT gives the honest
+    # post-decode verdict — the rendered DOM re-encodes it ('>' -> '&gt;'
+    # in text nodes), which would misreport a usable char as FAIL.
+    sink_names = [None] * len(reflected_matches)
+    sink_args = [None] * len(reflected_matches)
+    for sname, sarg in sinks:
+        for m in re.finditer(re.escape(MARKER_START) + r"(.*?)"
+                             + re.escape(MARKER_END), sarg, re.DOTALL):
+            reflected_matches.append(m.group(1))
+            refl_positions.append({"index": len(reflected_matches),
+                                   "start": -1, "end": -1, "sink": sname})
+            sink_names.append(sname)
+            sink_args.append(sarg)
 
     if not reflected_matches:
         print("[NOT FOUND] No reflection detected in response.")
-        print("         Ambiguous: either no reflection surface, or the whole")
-        print("         request was rejected by a filter/WAF.")
-        print("         -> Escalate: send_payloads.py --isolate --url \"...\"")
+        print("         Ambiguous: no reflection surface, filter/WAF rejected")
+        print("         the request, or reflection is client-side only (DOM).")
+        print("         -> Escalate: send_payloads.py --render --url \"...\" (DOM sinks)")
+        print("            then send_payloads.py --isolate --url \"...\" (per-char)")
         return
 
     expected_chars = [v for _, v in items]
@@ -214,10 +285,26 @@ def main():
     results = []
 
     for refl_idx, reflected in enumerate(reflected_matches, start=1):
+        sink_name = sink_names[refl_idx - 1]
         print(f"--- Reflection [{refl_idx}] ---")
         print(f"    Full reflected: {MARKER_START}{reflected}{MARKER_END}")
 
-        contexts = detect_reflection_context(content, MARKER_START + reflected + MARKER_END)
+        if sink_name is not None:
+            # The sink arg is itself the parseable context: for HTML sinks
+            # the marker may land inside an attribute of the written markup
+            # (e.g. <img src="...searchTerms=MARKER">) — detect that from the
+            # arg, not from the page DOM, so attr-breakout grammar applies.
+            if sink_name in _DOM_JS_SINKS:
+                inner = "javascript raw"
+            elif sink_name in _DOM_URL_SINKS:
+                inner = "attribute url value"
+            else:
+                inner = detect_reflection_context(
+                    sink_args[refl_idx - 1],
+                    MARKER_START + reflected + MARKER_END)[0]
+            contexts = [f"dom sink: {sink_name} ({inner})"]
+        else:
+            contexts = detect_reflection_context(content, MARKER_START + reflected + MARKER_END)
         print(f"    Context:    {', '.join(contexts)}")
         print()
 
@@ -303,6 +390,9 @@ def main():
             "generated_by": "check_reflection.py",
             "generated_at": datetime.now().isoformat(),
             "mode": label,
+            "probe_mode": probe_mode,
+            "dom_hint": dom_hint,
+            "dom_sinks": sinks or None,
             "source_html": html_file,
             "input_sent": input_str,
             "total_reflections": len(reflected_matches),

@@ -571,10 +571,27 @@ def hunt_xss(page_url, stem, max_targets):
         t0 = time.time()
         _skill_run(XSS_DIR / "send_payloads.py", "--url", tpl, "--probe2",
                    timeout=90)
+        t_chk = time.time()
         _skill_run(XSS_DIR / "check_reflection.py", timeout=60)
         _skill_run(XSS_DIR / "check_reflection.py", "--keywords", timeout=60)
+        # DOM escalation: re-probe through a real browser when the marker
+        # never reflected, OR when the response itself shows location.*
+        # source -> DOM-sink plumbing (a reflected surface can coexist with
+        # a DOM sink — the sink path never reaches the raw body). --verify
+        # follows probe_mode from the analysis automatically.
+        refl = _log_since("xss_reflection_analysis", t_chk)
+        if not (refl or {}).get("results") or (refl or {}).get("dom_hint"):
+            why = ("no server-side reflection"
+                   if not (refl or {}).get("results")
+                   else "location.* source -> DOM sink plumbing in page")
+            print(f"    [xss] {why} -> render probe (DOM sinks)")
+            _skill_run(XSS_DIR / "send_payloads.py", "--url", tpl,
+                       "--probe2", "--render", timeout=150)
+            _skill_run(XSS_DIR / "check_reflection.py", timeout=60)
+            _skill_run(XSS_DIR / "check_reflection.py", "--keywords",
+                       timeout=60)
         _skill_run(XSS_DIR / "recommend_payload.py", "--top", "3",
-                   "--verify", "--url", tpl, timeout=150)
+                   "--verify", "--url", tpl, timeout=240)
         rec = _log_since("xss_recommendation", t0)
         if not rec:
             continue
