@@ -96,8 +96,16 @@ def keyword_items():
     """KEYWORDS plus one random junk tag (e.g. <xDh>). If even this unknown
     tag is removed, the filter is a generic tag-stripper and ANY deleted
     string — including this random one — can be nested inside blocked
-    content as a splitter (case: xss tag removed.md)."""
-    return KEYWORDS + [("rand_tag", f"<{random_tag_name()}>")]
+    content as a splitter (case: xss tag removed.md).
+
+    The random tag is inserted BEFORE the first '<'-bearing item: denylist
+    regexes such as /<script[^>]*>/ match forward to the next '>', so an
+    unclosed item like '</script' would swallow the random tag into its
+    match and it would report 'encoded' instead of 'removed'."""
+    items = list(KEYWORDS)
+    idx = next((i for i, (_, v) in enumerate(items) if "<" in v), len(items))
+    items.insert(idx, ("rand_tag", f"<{random_tag_name()}>"))
+    return items
 
 
 def send_curl(url):
