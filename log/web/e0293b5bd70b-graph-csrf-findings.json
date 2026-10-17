@@ -1,0 +1,8 @@
+{
+  "generated_by": "check_csrf.py",
+  "source": "e0293b5bd70b-graph-csrf-forms.json",
+  "url": "http://localhost/xss/xss.php",
+  "checked_at": "2026-10-17T20:03:11",
+  "confirmed": 0,
+  "findings": []
+}

@@ -1,0 +1,12 @@
+{
+  "url": "http://localhost/xss/xss1.php",
+  "targets": [
+    {
+      "type": "get_form",
+      "template": "http://localhost/xss/xss1.php?q={xss_testing}",
+      "param": "q"
+    }
+  ],
+  "post_forms": [],
+  "target_count": 1
+}

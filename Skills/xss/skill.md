@@ -119,6 +119,10 @@ saved as `*-xss_keywords.html`. It detects filters the 6-char probe cannot
 see: blocked `()`, blocked keywords (`alert`, `javascript:`, `onerror`),
 `<script>` tag stripping, and entity passthrough (`&lt;`) + `srcdoc`
 availability for the last-resort srcdoc-entity technique.
+The probe also appends `rand_tag` — a random 3-letter tag like `<xDh>`
+regenerated on every run. If even that unknown tag is deleted, the filter
+is a generic tag-stripper and any removed string can be nested inside
+blocked content as a splitter (case `xss tag removed.md`).
 
 **Escalation probe (per-character isolation):**
 ```bash
@@ -255,9 +259,13 @@ How it works (mirrors XSStrike/DalFox internals):
 3. **Keyword mask gate** — if a `*-xss_keyword_analysis.json` exists (from
    `--probe2` + `check_reflection.py --keywords`), it is loaded
    automatically and gates the grammar further: blocked `()` selects
-   backtick calls, blocked `alert` selects `confirm`/`prompt`, stripped
-   `<script>` selects the nested `<scr<script>ipt>` bypass, blocked
-   `onerror`/`<img` removes those tag-handler variants, and when `()`,
+   backtick calls, blocked `alert` selects `confirm`/`prompt`, and any
+   fully-removed string (`<script>`, `<img`, `onerror`, the random
+   `rand_tag`, ...) becomes a splitter nested mid-target —
+   `<scr<xDh>ipt>` — so the filter's own deletion reconstructs the
+   blocked payload. Blocked
+   `onerror`/`<img` without a usable splitter removes those tag-handler
+   variants, and when `()`,
    `alert` or `<script>` are blocked while `&lt;`/`srcdoc` pass it emits the
    last-resort `<iframe srcdoc=&lt;…entity-encoded…&gt;>` payload.
 4. **Composition grammar** — payloads are assembled from tag × event-handler

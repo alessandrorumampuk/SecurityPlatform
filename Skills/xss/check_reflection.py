@@ -37,6 +37,23 @@ def strip_html_comments(content):
     return re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
 
 
+def items_from_meta(meta, kind):
+    """Recover the (name, value) probe items exactly as sent, from the saved
+    items_json metadata. Required because probe2 appends a per-run random
+    tag (rand_tag) that cannot be regenerated later. Falls back to the
+    static list for logs written before items_json existed."""
+    raw = meta.get("items_json")
+    if raw:
+        try:
+            return [(str(n), str(v)) for n, v in json.loads(raw)]
+        except (ValueError, TypeError):
+            pass
+    if kind == "keywords":
+        from send_payloads import KEYWORDS
+        return list(KEYWORDS)
+    return list(CHARACTERS)
+
+
 def extract_reflected_all(response):
     pattern = re.escape(MARKER_START) + r"(.*?)" + re.escape(MARKER_END)
     matches = list(re.finditer(pattern, response, re.DOTALL))
@@ -149,12 +166,11 @@ def main():
     args = ap.parse_args()
 
     if args.keywords:
-        from send_payloads import KEYWORDS
-        items = KEYWORDS
-        log_name, out_name, label = "xss_keywords", "xss_keyword_analysis", "keywords"
+        log_name, out_name, label, kind = \
+            "xss_keywords", "xss_keyword_analysis", "keywords", "keywords"
     else:
-        items = CHARACTERS
-        log_name, out_name, label = "xss", "xss_reflection_analysis", "chars"
+        log_name, out_name, label, kind = \
+            "xss", "xss_reflection_analysis", "chars", "characters"
 
     print("=" * 80)
     print("Check Reflection")
@@ -179,6 +195,9 @@ def main():
 
     meta = parse_meta(content)
     input_str = meta.get("input_sent", "")
+
+    items = items_from_meta(meta, kind)
+    print(f"Items: {len(items)} ({'items_json from log' if meta.get('items_json') else 'static list fallback'})")
 
     response_body = strip_html_comments(content)
     reflected_matches, refl_positions = extract_reflected_all(response_body)

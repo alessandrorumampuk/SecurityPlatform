@@ -132,7 +132,7 @@ specific label wins. Per-context payload shapes:
 
 | Context | Example reflection | Payload strategy |
 |---|---|---|
-| `html` | `<p>INJ</p>` | `<script>`, tag handlers, `javascript:` href, nested/case-mutated bypass, srcdoc last-resort |
+| `html` | `<p>INJ</p>` | `<script>`, tag handlers, `javascript:` href, removed-string nested splitter (`<scr<xDh>ipt>`), case-mutated bypass, srcdoc last-resort |
 | `attr` | `value="INJ"` | `">` breakout → tag handlers; `autofocus onfocus` in-context |
 | `attr_handler` | `onclick="go(INJ)"` | zero-breaker `alert(1)` — already inside JS |
 | `attr_url` | `href="INJ"` | `javascript:alert(1)` direct — no breakout needed; `">` fallback |
@@ -157,7 +157,9 @@ Each candidate must pass **all** applicable gates (a missing mask means
 3. **Keyword mask** — primitive vocabulary: `()`,`alert`,`confirm`,`prompt`,
    `print`, `<script>`, `javascript:`, `onerror`,`onload`,`ontoggle`,
    `autofocus`,`onfocus`, `<img`,`<svg`,`<details`,`<body`,`<iframe`,
-   `&lt;`, `srcdoc`.
+   `&lt;`, `srcdoc`, plus `rand_tag` — a random 3-letter tag (`<xDh>`)
+   regenerated per run; if it is deleted, any removed string becomes a
+   nested splitter for blocked content.
 4. **Junction mask** — combination units WAFs actually sign:
    `call_*` (`alert(1)`), `tick_*` (`` alert`1` ``), `pair_*`
    (`img onerror`), `close_*` (`</script`), `js_break_*` (`'-alert(1)-'`),
