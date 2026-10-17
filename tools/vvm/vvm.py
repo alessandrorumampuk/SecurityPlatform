@@ -4,8 +4,8 @@ VVM - Visual Vulnerability Mapping
 
 Takes a URL, screenshots the page, and annotates visible UI elements as
 potential vulnerability entry points, as described in the VVM + AVM + AI
-white paper. For each annotated element it prints an AVM table:
-Assumption -> Inversion -> Result.
+white paper. For each annotated element it prints a table of possible
+vulnerabilities.
 
 Rule-based only. No AI calls, no requests beyond loading the page once.
 Use only on sites you own or are authorized to test.
@@ -13,94 +13,80 @@ Use only on sites you own or are authorized to test.
 Usage:
     python3 vvm.py https://alessandrorumampuk.com/
     python3 vvm.py https://example.com -o out.png --report report.md
-    python3 vvm.py https://example.com --check-links   # also probe external links (HEAD)
+    python3 vvm.py https://example.com --hunt   # run the four skill detectors
 """
 
 import argparse
 import hashlib
+import json
+import re
+import socket
+import subprocess
 import sys
+import time
+import urllib.error
 import urllib.parse
+import urllib.request
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
-# Rules: element selector signature -> (label, assumption, inversion, vulns)
+# Rules: element selector signature -> (label, vulns)
+# Scope is restricted to the four supported detector classes:
+#   XSS, Information Disclosure, CSRF, Broken Link Hijacking.
+# Elements outside that scope still get mapped (attack surface) but carry
+# no vulnerability label (empty list).
 # ---------------------------------------------------------------------------
 
 RULES = [
     dict(kind="search",
          label="Search input",
-         assumption="User types a plain keyword",
-         inversion="User types code or a query fragment instead",
-         vulns=["SQL Injection", "Reflected XSS", "SSTI", "NoSQL Injection"]),
+         vulns=["XSS", "Information Disclosure"]),
     dict(kind="login",
          label="Login / password field",
-         assumption="User submits only their own credentials",
-         inversion="Attacker submits someone else's or enumerated credentials",
-         vulns=["Account Takeover", "Brute Force", "Credential Stuffing", "Auth Bypass"]),
+         vulns=["CSRF", "Information Disclosure"]),
     dict(kind="file",
          label="File upload",
-         assumption="Users upload safe file types",
-         inversion="Attacker uploads a script or executable",
-         vulns=["Unrestricted File Upload", "Stored XSS", "RCE via webshell"]),
+         vulns=["XSS"]),
     dict(kind="comment",
          label="Comment / text area",
-         assumption="Comments are plain text",
-         inversion="Comment contains executable markup",
-         vulns=["Stored XSS", "HTML Injection"]),
+         vulns=["XSS"]),
     dict(kind="form",
          label="Form",
-         assumption="Client-side validation is enforced server-side",
-         inversion="Attacker submits raw requests bypassing the form",
-         vulns=["Injection", "Mass Assignment", "CSRF"]),
+         vulns=["CSRF"]),
     dict(kind="urlparam",
          label="URL parameter (page URL)",
-         assumption="User only requests their own resources",
-         inversion="User changes the parameter value",
-         vulns=["IDOR", "Parameter Tampering", "Open Redirect"]),
+         vulns=["XSS", "Information Disclosure"]),
     dict(kind="paramlink",
          label="Link with query parameters",
-         assumption="Parameter values are trusted input",
-         inversion="Attacker rewrites values in the URL",
-         vulns=["IDOR", "Reflected XSS", "SQL Injection", "Open Redirect"]),
+         vulns=["XSS", "Information Disclosure"]),
     dict(kind="sociallink",
-         label="External / social link",
-         assumption="Old links stay alive and owned",
-         inversion="Target expires or is claimed by someone else",
-         vulns=["Broken Link Hijacking", "Phishing redirect"]),
+         label="Social media link (BLH scope)",
+         vulns=["Broken Link Hijacking"]),
     dict(kind="blanklink",
          label="target=_blank link",
-         assumption="Opened page is trusted",
-         inversion="Opened page rewrites the original tab",
-         vulns=["Reverse Tabnabbing"]),
+         vulns=[]),
     dict(kind="iframe",
          label="iframe",
-         assumption="Embedded content is trusted",
-         inversion="Embedded source is compromised or swapped",
-         vulns=["Content Injection", "Clickjacking aid"]),
+         vulns=[]),
     dict(kind="hidden",
          label="Hidden input",
-         assumption="Users never see or edit it",
-         inversion="Attacker modifies it in the request",
-         vulns=["Parameter Tampering", "Price/Privilege Manipulation"]),
+         vulns=["CSRF"]),
     dict(kind="editable",
          label="Editable content",
-         assumption="Rendered HTML came from safe source",
-         inversion="Stored markup reaches this area unsanitized",
-         vulns=["Stored XSS"]),
+         vulns=["XSS"]),
     dict(kind="weblink",
-         label="Navigation link",
-         assumption="Destination is fixed and safe",
-         inversion="Destination is user-controlled elsewhere",
-         vulns=["Open Redirect", "Broken Link Hijacking"]),
+         label="Network (external link)",
+         vulns=[]),
 ]
 
 JS_COLLECT = r"""
 () => {
     const seen = new Set();
     const els = [];
-    const add = (el, kind) => {
+    const add = (el, kind, extra) => {
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height || r.width < 8 || r.height < 8) return;
         const key = kind + '|' + Math.round(r.x) + '|' + Math.round(r.y) + '|' + Math.round(r.width);
@@ -108,27 +94,37 @@ JS_COLLECT = r"""
         seen.add(key);
         const docTop = r.top + window.scrollY, docLeft = r.left + window.scrollX;
         if (docTop > 20000) return;  // cap absurdly tall pages
-        els.push({ kind, x: docLeft, y: docTop, w: r.width, h: r.height,
+        els.push(Object.assign({ kind, x: docLeft, y: docTop, w: r.width, h: r.height,
                    desc: el.getAttribute('aria-label') || el.getAttribute('placeholder')
                       || el.getAttribute('name') || el.getAttribute('id')
                       || (el.textContent || '').trim().slice(0, 40)
-                      || el.getAttribute('href') || '' });
+                      || el.getAttribute('href') || '' }, extra || {}));
     };
 
+    const fieldInfo = el => ({ pname: el.name || '',
+        faction: el.form ? el.form.action : '',
+        fmethod: el.form ? (el.form.method || 'get').toLowerCase() : '' });
     document.querySelectorAll('input').forEach(el => {
         const t = (el.type || 'text').toLowerCase();
         const hint = ((el.name||'') + ' ' + (el.id||'') + ' ' + (el.placeholder||'')).toLowerCase();
-        if (t === 'hidden')            add(el, 'hidden');
-        else if (t === 'password')     add(el, 'login');
-        else if (t === 'file')         add(el, 'file');
-        else if (t === 'search' || /search|cari|q\b/.test(hint)) add(el, 'search');
-        else if (/login|signin|user|email|pass/.test(hint))      add(el, 'login');
-        else                           add(el, 'form');
+        const fi = fieldInfo(el);
+        if (t === 'hidden')            add(el, 'hidden', fi);
+        else if (t === 'password')     add(el, 'login', fi);
+        else if (t === 'file')         add(el, 'file', fi);
+        else if (t === 'search' || /search|cari|q\b/.test(hint)) add(el, 'search', fi);
+        else if (/login|signin|user|email|pass/.test(hint))      add(el, 'login', fi);
+        else                           add(el, 'form', fi);
     });
-    document.querySelectorAll('textarea').forEach(el => add(el, 'comment'));
+    document.querySelectorAll('textarea').forEach(el => add(el, 'comment', fieldInfo(el)));
     document.querySelectorAll('form').forEach(el => {
         const hasPwd = !!el.querySelector('input[type=password]');
-        add(el, hasPwd ? 'login' : 'form');
+        add(el, hasPwd ? 'login' : 'form', {
+            action: el.action || '',
+            method: (el.method || 'get').toLowerCase(),
+            inputs: Array.from(el.querySelectorAll('input,textarea'))
+                .filter(i => (i.type || 'text').toLowerCase() !== 'hidden')
+                .map(i => i.name).filter(Boolean)
+        });
     });
     document.querySelectorAll('iframe').forEach(el => add(el, 'iframe'));
     document.querySelectorAll('[contenteditable="true"]').forEach(el => add(el, 'editable'));
@@ -138,13 +134,17 @@ JS_COLLECT = r"""
         const href = el.getAttribute('href');
         if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
         let u; try { u = new URL(href, location.href); } catch(e) { return; }
-        const social = /(facebook|twitter|x\.com|instagram|linkedin|youtube|tiktok|github)\./.test(u.hostname);
-        if (u.search && u.search.length > 1)          add(el, 'paramlink');
-        else if (u.hostname !== host)                  add(el, social ? 'sociallink' : 'weblink');
-        if (el.target === '_blank')                    add(el, 'blanklink');
+        const social = /(^|\.)((facebook|fb|instagram|twitter|x|youtube|youtu|tiktok|telegram|linkedin)\.(com|me|be|net|org)|t\.me)$/.test(u.hostname);
+        const link = { href: u.href, hrefHost: u.hostname,
+                       rel: el.getAttribute('rel') || '',
+                       params: Array.from(u.searchParams.keys()) };
+        if (u.search && u.search.length > 1)          add(el, 'paramlink', link);
+        else if (u.hostname !== host)                  add(el, social ? 'sociallink' : 'weblink', link);
+        if (el.target === '_blank')                    add(el, 'blanklink', link);
     });
 
-    return { els, url: location.href,
+    const pageParams = Array.from(new URL(location.href).searchParams.keys());
+    return { els, url: location.href, pageParams,
              vh: window.innerHeight, scrollY: window.scrollY,
              height: document.documentElement.scrollHeight };
 }
@@ -162,42 +162,565 @@ def load_font(size):
     return ImageFont.load_default()
 
 
-def annotate(img, findings):
-    """Draw numbered red boxes; returns the annotated image."""
+def annotate(img, findings, el_vulns=None, show_all=False, banner=None):
+    """Annotate the screenshot.
+
+    Default: only elements tied to VERIFIED findings get a red box +
+    "VERIFIED:" badge; verified findings with no on-page element (URL
+    params, exposed paths) are listed in a banner strip on top.
+    show_all=True restores the old behaviour (every mapped element boxed,
+    candidates in gray).
+    """
     img = img.convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(overlay)
     font = load_font(16)
+
+    if banner:
+        lines = ["VERIFIED VULNERABILITIES"] + banner
+        bh = len(lines) * 20 + 12
+        d.rectangle([0, 0, img.width, bh], fill=(140, 10, 10, 235))
+        for i, ln in enumerate(lines):
+            d.text((8, 6 + i * 20), ln, fill="white", font=font)
+
+    # Same physical element can be mapped as several nodes (e.g. an anchor
+    # that is both sociallink and blanklink) -- merge overlapping verified
+    # boxes so one link gets one badge, not one badge per node kind.
+    def _intersects(a, b):
+        return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
+
+    groups = []   # [box, set(vulns)]
     for i, f in enumerate(findings, 1):
-        x, y, w, h = f["x"], f["y"], f["w"], f["h"]
+        ver = (el_vulns or {}).get(i)
+        if not ver:
+            continue
+        box = [f["x"], f["y"], f["x"] + f["w"], f["y"] + f["h"]]
+        for g in groups:
+            if _intersects(g[0], box):
+                g[0] = [min(g[0][0], box[0]), min(g[0][1], box[1]),
+                        max(g[0][2], box[2]), max(g[0][3], box[3])]
+                g[1].update(ver)
+                break
+        else:
+            groups.append([box, set(ver)])
+
+    badge_rects = []
+
+    def _overlaps(r):
+        return any(_intersects(r, o) for o in badge_rects)
+
+    def draw_verified(box, ver):
         pad = 4
-        box = [x - pad, y - pad, x + w + pad, y + h + pad]
+        box = [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad]
         d.rectangle(box, outline=(220, 40, 40, 255), width=3)
         d.rectangle(box, fill=(220, 40, 40, 30))
-        # numbered badge
-        label = str(i)
+        label = "VERIFIED: " + ", ".join(sorted(ver))
         tb = d.textbbox((0, 0), label, font=font)
-        bw, bh = tb[2] - tb[0] + 10, tb[3] - tb[1] + 8
-        bx, by = box[0], max(0, box[1] - bh - 2)
-        d.rectangle([bx, by, bx + bw, by + bh], fill=(220, 40, 40, 235))
+        bw, bh2 = tb[2] - tb[0] + 10, tb[3] - tb[1] + 8
+        bx = box[0]
+        slots = [max(0, box[1] - bh2 - 2)] + \
+                [box[3] + 2 + k * (bh2 + 2) for k in range(4)]
+        for by in slots:
+            if not _overlaps([bx, by, bx + bw, by + bh2]):
+                break
+        d.rectangle([bx, by, bx + bw, by + bh2], fill=(220, 40, 40, 235))
+        badge_rects.append([bx, by, bx + bw, by + bh2])
         d.text((bx + 5, by + 4), label, fill="white", font=font)
+
+    for box, ver in groups:
+        draw_verified(box, ver)
+
+    if show_all:
+        for f in findings:
+            box = [f["x"], f["y"], f["x"] + f["w"], f["y"] + f["h"]]
+            if any(_intersects(box, g[0]) for g in groups):
+                continue
+            d.rectangle(box, outline=(140, 140, 140, 255), width=1)
+            label = ", ".join(f["rule"]["vulns"])
+            tb = d.textbbox((0, 0), label, font=font)
+            bw, bh2 = tb[2] - tb[0] + 10, tb[3] - tb[1] + 8
+            bx, by = box[0], max(0, box[1] - bh2 - 2)
+            d.rectangle([bx, by, bx + bw, by + bh2], fill=(140, 140, 140, 235))
+            d.text((bx + 5, by + 4), label, fill="white", font=font)
     return Image.alpha_composite(img, overlay).convert("RGB")
+
+
+def _resolve_path_els(graph, path):
+    """Node ids in a finding path -> owning el indices (has_param /
+    points_to resolution), so verified findings land on real elements."""
+    edges = graph["edges"]
+    owners = {}
+    for e in edges:
+        if e["type"] in ("has_param", "points_to"):
+            owners.setdefault(e["dst"], []).append(e["src"])
+    els = set()
+    for nid in path:
+        for cid in [nid] + owners.get(nid, []):
+            if cid.startswith("el:"):
+                els.add(int(cid.split(":")[1]))
+    return els
+
+
+def verified_element_vulns(graph):
+    """el_index -> set of verified vuln names, resolved through paths."""
+    el_v = {}
+    for f in graph.get("findings", []):
+        if f["status"] != "verified":
+            continue
+        for i in _resolve_path_els(graph, f.get("path", [])):
+            el_v.setdefault(i, set()).add(f["vuln"])
+    return el_v
 
 
 def build_report(url, findings):
     lines = [f"# VVM Report", "", f"**URL:** {url}", "",
-             "| # | Element | Assumption | Inversion | Possible vulnerabilities |",
-             "|---|---|---|---|---|"]
+             "| # | Element | Possible vulnerabilities |",
+             "|---|---|---|"]
     seen_rules = {}
     for i, f in enumerate(findings, 1):
         r = f["rule"]
         seen_rules[f["kind"]] = r
         desc = f' — "{f["desc"]}"' if f.get("desc") else ""
         lines.append(
-            f"| {i} | {r['label']}{desc} | {r['assumption']} | {r['inversion']} "
-            f"| {', '.join(r['vulns'])} |")
+            f"| {i} | {r['label']}{desc} | {', '.join(r['vulns'])} |")
     lines += ["", "_Use only on sites you own or are authorized to test._"]
     return "\n".join(lines)
+
+
+def build_graph(data, findings, shot_name, rule_by_kind):
+    """Assemble nodes+edges from collected elements.
+
+    Nodes: Page, Element (with screenshot provenance), Domain, Endpoint,
+    Parameter. Edges: hosts, points_to, submits_to, has_param, flows_to.
+    """
+    nodes, edges, seen = {}, [], set()
+
+    def node(nid, **props):
+        nodes.setdefault(nid, dict(id=nid, **props))
+
+    def edge(src, dst, typ, **props):
+        if (src, dst, typ) in seen:
+            return
+        seen.add((src, dst, typ))
+        edges.append(dict(src=src, dst=dst, type=typ, **props))
+
+    page_id = "page:" + data["url"]
+    node(page_id, type="Page", url=data["url"])
+
+    for i, f in enumerate(findings, 1):
+        eid = f"el:{i}"
+        node(eid, type="Element", kind=f["kind"], label=f["rule"]["label"],
+             desc=f.get("desc", ""), vulns=f["rule"]["vulns"],
+             prov=dict(screenshot=shot_name,
+                       bbox=[f["x"], f["y"], f["w"], f["h"]]))
+        edge(page_id, eid, "hosts")
+
+        host = f.get("hrefHost")
+        if host:
+            did = "dom:" + host
+            node(did, type="Domain", host=host)
+            edge(eid, did, "points_to", href=f.get("href", ""))
+
+        action = f.get("action")
+        if action:
+            base = action.split("?")[0]
+            epid = "ep:" + base
+            node(epid, type="Endpoint", url=base)
+            edge(eid, epid, "submits_to")
+
+        for pname in f.get("params") or []:
+            pid = "param:" + pname
+            node(pid, type="Parameter", name=pname,
+                 vulns=rule_by_kind["paramlink"]["vulns"])
+            edge(eid, pid, "has_param")
+            if f.get("href"):
+                base = f["href"].split("?")[0]
+                epid = "ep:" + base
+                node(epid, type="Endpoint", url=base)
+                edge(pid, epid, "flows_to")
+
+        # GET-form fields become URL params when submitted -- link the
+        # element to its param node so findings resolve onto the field.
+        field_names = list(f.get("inputs") or [])
+        if f.get("pname"):
+            field_names.append(f["pname"])
+        is_get = (f.get("method") == "get"
+                  or f.get("fmethod") == "get")
+        if is_get:
+            for pname in field_names:
+                pid = "param:" + pname
+                node(pid, type="Parameter", name=pname,
+                     vulns=rule_by_kind["urlparam"]["vulns"])
+                edge(eid, pid, "has_param")
+                act = f.get("action") or f.get("faction")
+                if act:
+                    epid = "ep:" + act.split("?")[0]
+                    node(epid, type="Endpoint", url=act.split("?")[0])
+                    edge(pid, epid, "flows_to")
+
+    for pname in data.get("pageParams") or []:
+        pid = "param:" + pname
+        node(pid, type="Parameter", name=pname,
+             vulns=rule_by_kind["urlparam"]["vulns"])
+        edge(page_id, pid, "has_param", via="page URL")
+
+    return dict(meta=dict(url=data["url"], elements=len(findings)),
+                nodes=list(nodes.values()), edges=edges)
+
+
+SEC_HEADERS = ["content-security-policy", "x-frame-options",
+               "strict-transport-security", "x-content-type-options",
+               "referrer-policy", "permissions-policy"]
+
+
+def _gnode(graph, nid, **props):
+    for n in graph["nodes"]:
+        if n["id"] == nid:
+            return
+    graph["nodes"].append(dict(id=nid, **props))
+
+
+def _gedge(graph, src, dst, typ, **props):
+    for e in graph["edges"]:
+        if e["src"] == src and e["dst"] == dst and e["type"] == typ:
+            return
+    graph["edges"].append(dict(src=src, dst=dst, type=typ, **props))
+
+
+def merge_passive(graph, passive):
+    """Fold passive response facts (headers, TLS, cookies, DNS) into graph."""
+    page = next(n for n in graph["nodes"] if n["type"] == "Page")
+    hdrs = {k.lower(): v for k, v in (passive.get("headers") or {}).items()}
+    page["http_status"] = passive.get("status")
+    page["headers"] = {h: hdrs[h] for h in SEC_HEADERS if h in hdrs}
+    page["missing_headers"] = [h for h in SEC_HEADERS if h not in hdrs]
+
+    tls = passive.get("tls")
+    if tls:
+        cid = "cert:" + (tls.get("subjectName") or page["id"])
+        _gnode(graph, cid, type="Certificate", **tls)
+        _gedge(graph, page["id"], cid, "secured_by")
+
+    for c in passive.get("cookies") or []:
+        missing = []
+        if not c.get("secure"):
+            missing.append("Secure")
+        if not c.get("httpOnly"):
+            missing.append("HttpOnly")
+        if c.get("sameSite") in (None, "", "None"):
+            missing.append("SameSite")
+        cid = "cookie:" + c["name"]
+        _gnode(graph, cid, type="Cookie", name=c["name"],
+               domain=c.get("domain"), missing_flags=missing)
+        _gedge(graph, page["id"], cid, "sets_cookie")
+
+    host = passive.get("host")
+    if host:
+        did = "dom:" + host
+        _gnode(graph, did, type="Domain", host=host)
+        _gedge(graph, page["id"], did, "hosted_on")
+        for ip in passive.get("ips") or []:
+            iid = "ip:" + ip
+            _gnode(graph, iid, type="IP", addr=ip)
+            _gedge(graph, did, iid, "resolves_to")
+
+
+def dedupe_findings(finds):
+    """Dedupe by (vuln, evidence), merging element paths."""
+    uniq = {}
+    for f in finds:
+        k = (f["vuln"], f["evidence"])
+        if k in uniq:
+            uniq[k]["path"] += [x for x in f["path"]
+                                if x not in uniq[k]["path"]]
+        else:
+            uniq[k] = f
+    return list(uniq.values())
+
+
+# ---------------------------------------------------------------------------
+# Skill orchestration (--hunt)
+#
+# The four deterministic detectors under Cybersecurity/Skills are run as
+# subprocesses exactly as they would be from the CLI (same interpreter, the
+# skill dir as cwd). Skills are never imported or modified -- vvm only
+# consumes their JSON output and folds CONFIRMED/verified results into the
+# graph findings. A skill result only upgrades to "verified" through the
+# tool's own oracle: a DOM marker grade V, a CONFIRMED signature+format hit,
+# or an evaluated not-found profile check.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SKILLS_DIR = REPO_ROOT / "Cybersecurity" / "Skills"
+SKILL_LOG = SKILLS_DIR / "log"
+XSS_DIR = SKILLS_DIR / "xss"
+INFOLEAK_DIR = SKILLS_DIR / "info_disclosure"
+CSRF_DIR = SKILLS_DIR / "csrf"
+BLH_DIR = SKILLS_DIR / "broken_link_hijacking"
+
+# Statuses meaning a BLH checker never actually evaluated the page
+# (same convention as verify_tools.py -- an error/captcha is not a
+# not-found answer).
+_UNEVALUATED = {"CAPTCHA", "UNVERIFIABLE", "NoResponse", "Unknown"}
+
+
+def _skill_run(script, *argv, timeout=180):
+    """Run a skill script; return (combined_output, start_time, returncode)."""
+    t0 = time.time()
+    try:
+        p = subprocess.run(
+            [sys.executable, str(script), *[str(a) for a in argv]],
+            cwd=str(script.parent), capture_output=True, text=True,
+            timeout=timeout, stdin=subprocess.DEVNULL)
+        return (p.stdout or "") + (p.stderr or ""), t0, p.returncode
+    except subprocess.TimeoutExpired:
+        return f"[skill timeout after {timeout}s]", t0, 124
+    except Exception as e:
+        return f"[skill launch error: {e}]", t0, 1
+
+
+def _log_since(prefix, t0):
+    """Load newest Skills/log/*-<prefix>.json written after t0 (or None)."""
+    newest, best = None, t0 - 1.5
+    try:
+        for f in SKILL_LOG.glob(f"*-{prefix}.json"):
+            if f.stat().st_mtime >= best:
+                newest, best = f, f.stat().st_mtime
+    except OSError:
+        return None
+    if not newest:
+        return None
+    try:
+        return json.loads(newest.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _evaluated(res):
+    st = str(res.get("status", ""))
+    return st not in _UNEVALUATED and not st.startswith("Error")
+
+
+def hunt_infoleak(page_url, stem):
+    """Run probe_paths + check_leak on the origin; trigger_errors on the
+    page URL when it carries query params. Returns finding dicts."""
+    u = urllib.parse.urlsplit(page_url)
+    origin = f"{u.scheme}://{u.netloc}"
+    finds = []
+
+    probe = stem + "-infoleak-probe.json"
+    graded = stem + "-infoleak-findings.json"
+    print(f"  [info_disclosure] probing {origin} (82 paths)...")
+    _skill_run(INFOLEAK_DIR / "probe_paths.py",
+               "--url", origin, "--out", probe, "--delay", "0.15",
+               timeout=150)
+    _skill_run(INFOLEAK_DIR / "check_leak.py",
+               "--file", probe, "--out", graded, timeout=60)
+    data = _read_json(graded)
+    for f in (data or {}).get("findings", []):
+        grade = f.get("grade", "")
+        ev = " · ".join(f.get("evidence", [])[:4])
+        secs = ", ".join(f.get("secrets_redacted", [])[:3])
+        finds.append(dict(
+            vuln="Information Disclosure",
+            status="verified" if grade == "CONFIRMED" else "candidate",
+            path=["page:" + page_url],
+            tool="info_disclosure",
+            evidence=(f"GET {origin}{f.get('path')} -> {f.get('status')} "
+                      f"[{grade}/{f.get('severity')}] {ev}"
+                      + (f" secrets: {secs}" if secs else ""))))
+
+    if u.query:
+        errs = stem + "-infoleak-errors.json"
+        print("  [info_disclosure] error-trigger probe on page params...")
+        _skill_run(INFOLEAK_DIR / "trigger_errors.py",
+                   "--url", page_url, "--out", errs, "--delay", "0.15",
+                   timeout=120)
+        edata = _read_json(errs)
+        for f in (edata or {}).get("findings", []):
+            grade = f.get("grade", "")
+            sigs = ",".join(f.get("new_signatures", [])[:3])
+            finds.append(dict(
+                vuln="Information Disclosure",
+                status="verified" if grade == "CONFIRMED" else "candidate",
+                path=["page:" + page_url],
+                tool="info_disclosure/trigger_errors",
+                evidence=(f"{f.get('param')}={f.get('mutation')!r} -> "
+                          f"HTTP {f.get('status')} [{grade}] {sigs}")))
+    return finds
+
+
+def hunt_xss(page_url, stem, max_targets):
+    """The xss skill owns the whole detection chain: find_surface.py
+    discovers injectable params, then the existing pipeline
+    (send_payloads -> check_reflection -> recommend_payload --verify)
+    grades them. V-graded payloads become verified findings."""
+    surf_j = stem + "-xss-surface.json"
+    print("  [xss] discovering attack surface (skill find_surface.py)...")
+    _skill_run(XSS_DIR / "find_surface.py", "--url", page_url,
+               "--out", surf_j, timeout=60)
+    surf = _read_json(surf_j) or {}
+    targets = [t["template"] for t in surf.get("targets", [])]
+    if surf.get("post_forms"):
+        print(f"  [xss] {len(surf['post_forms'])} POST form(s) noted as "
+              "stored-XSS surface (no stored oracle yet)")
+
+    finds = []
+    for tpl in targets[:max_targets]:
+        print(f"  [xss] pipeline on {tpl[:90]}")
+        t0 = time.time()
+        _skill_run(XSS_DIR / "send_payloads.py", "--url", tpl, "--probe2",
+                   timeout=90)
+        _skill_run(XSS_DIR / "check_reflection.py", timeout=60)
+        _skill_run(XSS_DIR / "check_reflection.py", "--keywords", timeout=60)
+        _skill_run(XSS_DIR / "recommend_payload.py", "--top", "3",
+                   "--verify", "--url", tpl, timeout=150)
+        rec = _log_since("xss_recommendation", t0)
+        if not rec:
+            continue
+        for refl in rec.get("reflections", []):
+            cands = refl.get("candidates", [])
+            vers = refl.get("verification") or []
+            param = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(tpl).query)
+            pname = next((k for k, v in param.items()
+                          if v and v[0] == "{xss_testing}"), "?")
+            for i, v in enumerate(vers):
+                grade = v.get("confidence")
+                if grade not in ("V", "R"):
+                    continue
+                finds.append(dict(
+                    vuln="XSS",
+                    status="verified" if grade == "V" else "candidate",
+                    path=["page:" + page_url, "param:" + pname],
+                    tool="xss",
+                    evidence=(f"[{grade}] {v.get('payload', '')} -- "
+                              f"{(v.get('evidence') or '')[:110]}")))
+            if not vers and cands:
+                finds.append(dict(
+                    vuln="XSS",
+                    status="candidate",
+                    path=["page:" + page_url, "param:" + pname],
+                    tool="xss",
+                    evidence=(f"param {pname}: {len(cands)} unverified "
+                              f"candidates, e.g. "
+                              f"{cands[0].get('payload', '')[:80]}")))
+    return finds
+
+
+_BLH_CHECKERS = {"instagram.com": "instagram", "tiktok.com": "tiktok",
+                 "youtube.com": "youtube", "youtu.be": "youtube",
+                 "facebook.com": "facebook", "fb.com": "facebook"}
+
+
+def hunt_blh(graph):
+    """For every social-link edge whose platform has a checker, run the
+    skill's checker script; its verdict alone decides BLH. Links on
+    platforms without a checker are out of scope (no oracle -> no claim).
+    """
+    byid = {n["id"]: n for n in graph["nodes"]}
+    finds = []
+    done = set()
+    for e in graph["edges"]:
+        if e["type"] != "points_to":
+            continue
+        dom = byid.get(e["dst"], {})
+        host = (dom.get("host") or "").lower().lstrip("www.")
+        platform = next((v for k, v in _BLH_CHECKERS.items()
+                         if host == k or host.endswith("." + k)), None)
+        href = e.get("href", "")
+        if not platform or href in done:
+            continue
+        done.add(href)
+        print(f"  [blh:{platform}] profile check {href}")
+        script = BLH_DIR / f"open_{platform}_playwright.py"
+        out, t0, rc = _skill_run(script, href, timeout=300)
+        rep = _log_since(f"broken_link_hijacking_{platform}_verify", t0)
+        res = (rep or {}).get("results", [{}])[0]
+        evi = e.get("href", "")
+        if not res:
+            finds.append(dict(
+                vuln="Broken Link Hijacking",
+                status="candidate",
+                path=[e["src"], e["dst"]], tool="broken_link_hijacking",
+                evidence=(f"{evi} -- checker unavailable "
+                          f"(rc={rc}; login may be required)")))
+        elif res.get("exists") is False and _evaluated(res):
+            finds.append(dict(
+                vuln="Broken Link Hijacking",
+                status="verified",
+                path=[e["src"], e["dst"]], tool="broken_link_hijacking",
+                evidence=(f"{evi} -- platform checker evaluated page: "
+                          f"profile not found (status={res.get('status')})")))
+        elif res.get("exists") is True:
+            # profile actually exists -> earlier dead verdict was a
+            # transport-level false positive; drop the finding entirely
+            continue
+        else:
+            finds.append(dict(
+                vuln="Broken Link Hijacking",
+                status="candidate",
+                path=[e["src"], e["dst"]], tool="broken_link_hijacking",
+                evidence=(f"{evi} -- checker status "
+                          f"{res.get('status')}; needs manual review")))
+    return finds
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8",
+                                               errors="replace"))
+    except Exception:
+        return None
+
+
+def hunt_csrf(graph, page_url, stem, cookie):
+    """Run the csrf skill: enumerate forms -> replay oracle.
+    CONFIRMED grades become verified findings; DEFENDED/SKIPPED are
+    dropped (not vulnerabilities)."""
+    forms_j = stem + "-csrf-forms.json"
+    finds_j = stem + "-csrf-findings.json"
+    print("  [csrf] enumerating forms...")
+    argv = ["--url", page_url, "--out", forms_j]
+    if cookie:
+        argv += ["--cookie", cookie]
+    _skill_run(CSRF_DIR / "enumerate_forms.py", *argv, timeout=60)
+
+    print("  [csrf] replay oracle (writes state on the target)")
+    argv = ["--file", forms_j, "--out", finds_j, "--delay", "0.15"]
+    if cookie:
+        argv += ["--cookie", cookie]
+    _skill_run(CSRF_DIR / "check_csrf.py", *argv, timeout=180)
+
+    data = _read_json(finds_j)
+    finds = []
+    for f in (data or {}).get("findings", []):
+        if f.get("grade") in ("DEFENDED", "SKIPPED"):
+            continue
+        # resolve the owning form element via submits_to -> ep:<action>
+        epid = "ep:" + (f.get("action", "").split("?")[0])
+        srcs = [e["src"] for e in graph["edges"]
+                if e["type"] == "submits_to" and e["dst"] == epid]
+        finds.append(dict(
+            vuln="CSRF",
+            status="verified" if f.get("grade") == "CONFIRMED" else "candidate",
+            path=srcs or ["page:" + page_url],
+            tool="csrf",
+            evidence=f"{f.get('action')} -- {f.get('evidence', '')}"))
+    return finds
+
+
+def hunt_skills(graph, data, page_url, stem, max_xss, cookie=""):
+    """Run all available skill tools; fold their results into findings."""
+    if not SKILLS_DIR.is_dir():
+        print(f"  [!] skills dir not found: {SKILLS_DIR}")
+        return []
+    finds = []
+    finds += hunt_infoleak(page_url, stem)
+    finds += hunt_xss(page_url, stem, max_xss)
+    finds += hunt_csrf(graph, page_url, stem, cookie)
+    finds += hunt_blh(graph)
+    return finds
 
 
 def main():
@@ -205,8 +728,17 @@ def main():
     ap.add_argument("url", help="Page URL to map")
     ap.add_argument("-o", "--output", default=None, help="Output PNG path")
     ap.add_argument("--report", default=None, help="Write AVM markdown report")
-    ap.add_argument("--check-links", action="store_true",
-                    help="HEAD-probe external links to flag dead ones")
+    ap.add_argument("--hunt", action="store_true",
+                    help="Run the four Skills detectors (xss, "
+                         "info_disclosure, csrf, broken_link_hijacking) "
+                         "and fold their verified results into the "
+                         "findings. All verdicts come from the skills.")
+    ap.add_argument("--hunt-max-xss", type=int, default=3,
+                    help="Max parameterized URLs to run the xss pipeline on "
+                         "(default 3)")
+    ap.add_argument("--show-candidates", action="store_true",
+                    help="Also print unverified candidate findings "
+                         "(default: verified only)")
     args = ap.parse_args()
 
     out = args.output or "vvm-" + hashlib.md5(args.url.encode()).hexdigest()[:8] + ".png"
@@ -255,39 +787,93 @@ def main():
         page.wait_for_timeout(1200)
 
         data = page.evaluate(JS_COLLECT)
+
+        # Passive collectors: everything observable from the single page
+        # load -- response headers, TLS cert, cookies, page-host DNS.
+        passive = dict(status=resp.status if resp else None,
+                       headers=dict(resp.headers) if resp else {},
+                       tls=None, cookies=ctx.cookies(),
+                       host=urllib.parse.urlparse(data["url"]).hostname,
+                       ips=[])
+        if resp is not None:
+            try:
+                passive["tls"] = resp.security_details()
+            except Exception:
+                pass
+        try:
+            passive["ips"] = sorted({a[4][0] for a in
+                                     socket.getaddrinfo(passive["host"], 443)})
+        except (OSError, TypeError):
+            pass
+
         shot = page.screenshot()
+
+        # Build the graph while the browser is still open.
+        rule_by_kind = {r["kind"]: r for r in RULES}
+        findings = []
+        for el in data["els"]:
+            if el["kind"] in rule_by_kind:
+                f = dict(el)
+                f["rule"] = rule_by_kind[el["kind"]]
+                findings.append(f)
+
+        graph = build_graph(data, findings, out, rule_by_kind)
+        merge_passive(graph, passive)
         browser.close()
-
-    rule_by_kind = {r["kind"]: r for r in RULES}
-    findings = []
-    for el in data["els"]:
-        if el["kind"] in rule_by_kind:
-            f = dict(el)
-            f["rule"] = rule_by_kind[el["kind"]]
-            findings.append(f)
-
-    img = Image.open(__import__("io").BytesIO(shot))
-    annotate(img, findings).save(out)
 
     report = build_report(data["url"], findings)
     open(report_path, "w").write(report)
     print(report)
 
-    if args.check_links:
-        import urllib.request
-        print("\nExternal link probe (HEAD):")
-        for f in findings:
-            if f["kind"] in ("sociallink", "weblink", "blanklink") and f["desc"]:
-                try:
-                    req = urllib.request.Request(f["desc"], method="HEAD",
-                                                 headers={"User-Agent": "Mozilla/5.0"})
-                    code = urllib.request.urlopen(req, timeout=8).status
-                    flag = "" if code < 400 else "  <-- DEAD?"
-                    print(f"  {code} {f['desc'][:70]}{flag}")
-                except Exception as e:
-                    print(f"  ERR {f['desc'][:70]}  ({e})  <-- check")
+    graph_path = out.rsplit(".", 1)[0] + "-graph.json"
+    graph["findings"] = []
 
-    print(f"\n{len(findings)} elements mapped -> {out}\nAVM table -> {report_path}")
+    if args.hunt:
+        print("\nSkill detectors (--hunt):")
+        # session cookies from the real page load, so authenticated forms
+        # are replayed in-context by the csrf oracle
+        cookie_hdr = "; ".join(
+            f"{c['name']}={c['value']}" for c in passive["cookies"])
+        # absolute stem: skill subprocesses run with their own cwd, so a
+        # relative sidecar path would land inside the skill directory
+        stem = str(Path(graph_path[:-5]).resolve())
+        graph["findings"] += hunt_skills(
+            graph, data, data["url"], stem, args.hunt_max_xss,
+            cookie_hdr)
+        graph["findings"] = dedupe_findings(graph["findings"])
+
+    # Annotate AFTER findings are final: only verified findings mark the
+    # page (red box + badge); unattached verified vulns go into a banner.
+    el_vulns = verified_element_vulns(graph)
+    banner = [fnd["vuln"] for fnd in graph["findings"]
+              if fnd["status"] == "verified"
+              and not _resolve_path_els(graph, fnd.get("path", []))]
+    img = Image.open(__import__("io").BytesIO(shot))
+    annotate(img, findings, el_vulns=el_vulns,
+             show_all=args.show_candidates, banner=banner).save(out)
+
+    open(graph_path, "w").write(json.dumps(graph, indent=2))
+    verified = [f for f in graph["findings"] if f["status"] == "verified"]
+    cand_n = len(graph["findings"]) - len(verified)
+    if verified:
+        print(f"\nVerified vulnerabilities ({len(verified)}):")
+        for fnd in verified:
+            tool = f"  [{fnd['tool']}]" if fnd.get("tool") else ""
+            print(f"  {fnd['vuln']}: {fnd['evidence']}{tool}")
+    else:
+        print("\nNo verified vulnerabilities.")
+    if args.show_candidates:
+        for fnd in graph["findings"]:
+            if fnd["status"] != "verified":
+                tool = f"  [{fnd['tool']}]" if fnd.get("tool") else ""
+                print(f"  [candidate] {fnd['vuln']}: {fnd['evidence']}{tool}")
+    elif cand_n:
+        print(f"  ({cand_n} candidate(s) kept in graph JSON only -- "
+              f"pass --show-candidates to list)")
+
+    print(f"\n{len(findings)} elements mapped -> {out}\nAVM table -> {report_path}\n"
+          f"Graph -> {graph_path} ({len(graph['nodes'])} nodes, "
+          f"{len(graph['edges'])} edges)")
 
 
 if __name__ == "__main__":

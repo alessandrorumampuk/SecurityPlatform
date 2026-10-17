@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VVM — Visual Vulnerability Mapping | Dari Temuan Teknis ke Dampak Bisnis</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+<style>
+  html { scroll-behavior: smooth; }
+  body { background: #0a0e14; font-family: "Inter", -apple-system, sans-serif; }
+  .mono { font-family: "SF Mono", "Menlo", monospace; }
+  .glow-red { box-shadow: 0 0 24px rgba(220,38,38,.25); }
+  .grid-bg {
+    background-image: linear-gradient(rgba(148,163,184,.05) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(148,163,184,.05) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+  .fade-in { opacity: 0; transform: translateY(24px); }
+  .card-find { transition: all .5s cubic-bezier(.22,1,.36,1); }
+  .mode-exec .tech { display: none; }
+  .mode-tech .exec { display: none; }
+  .toggle-dot { transition: transform .3s cubic-bezier(.22,1,.36,1); }
+  input:checked ~ .toggle-dot { transform: translateX(28px); }
+  .scan-line {
+    position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+  }
+  .scan-line::after {
+    content: ""; position: absolute; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(220,38,38,.6), transparent);
+    animation: scan 6s linear infinite;
+  }
+  @keyframes scan { 0% { top: -2% } 100% { top: 102% } }
+</style>
+</head>
+<body class="text-slate-200 antialiased">
+
+<!-- NAV -->
+<nav class="fixed top-0 inset-x-0 z-50 border-b border-white/5 bg-[#0a0e14]/80 backdrop-blur">
+  <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded border-2 border-red-500 flex items-center justify-center mono text-red-500 font-bold text-sm">V</div>
+      <span class="font-semibold tracking-tight">VVM <span class="text-slate-500 font-normal">/ Visual Vulnerability Mapping</span></span>
+    </div>
+    <div class="hidden md:flex items-center gap-8 text-sm text-slate-400">
+      <a href="#masalah" class="hover:text-white transition">Masalah</a>
+      <a href="#demo" class="hover:text-white transition">Demo Nyata</a>
+      <a href="#cara" class="hover:text-white transition">Cara Kerja</a>
+      <a href="#nilai" class="hover:text-white transition">Nilai Bisnis</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="relative grid-bg pt-40 pb-28 px-6 overflow-hidden">
+  <div class="scan-line"></div>
+  <div class="max-w-4xl mx-auto text-center fade-in" id="hero">
+    <div class="inline-flex items-center gap-2 border border-red-500/30 bg-red-500/10 text-red-400 text-xs mono px-3 py-1.5 rounded-full mb-8">
+      <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
+      ATTACK SURFACE → BUSINESS IMPACT
+    </div>
+    <h1 class="text-4xl md:text-6xl font-bold tracking-tight leading-[1.1] text-white">
+      Scanner lain melaporkan<br>
+      <span class="text-slate-500 line-through decoration-red-500/60 decoration-4">"SQL Injection"</span><br>
+      <span class="text-red-500">kami melaporkan berapa juta data<br>yang bisa dicuri malam ini.</span>
+    </h1>
+    <p class="mt-8 text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
+      VVM memetakan permukaan serangan sebuah situs secara visual, lalu
+      <strong class="text-slate-200">menerjemahkannya ke bahasa yang dipahami Direktur Utama</strong> —
+      bukan bahasa mesin.
+    </p>
+    <div class="mt-10 flex flex-wrap justify-center gap-4">
+      <a href="#demo" class="bg-red-600 hover:bg-red-500 text-white font-semibold px-8 py-3.5 rounded-lg transition glow-red">Lihat Demo Nyata</a>
+      <a href="#cara" class="border border-slate-700 hover:border-slate-500 text-slate-300 px-8 py-3.5 rounded-lg transition">Cara Kerja</a>
+    </div>
+  </div>
+</header>
+
+<!-- STATS -->
+<section class="border-y border-white/5 bg-[#0d1117]">
+  <div class="max-w-6xl mx-auto px-6 py-10 grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
+    <div class="fade-in"><div class="text-3xl font-bold text-white mono">$4.44M</div><div class="text-xs text-slate-500 mt-1">biaya rata-rata data breach global<br><span class="text-slate-600">IBM Cost of a Data Breach 2025</span></div></div>
+    <div class="fade-in"><div class="text-3xl font-bold text-white mono">$10.22M</div><div class="text-xs text-slate-500 mt-1">rata-rata biaya breach di AS<br><span class="text-slate-600">rekor tertinggi, IBM 2025</span></div></div>
+    <div class="fade-in"><div class="text-3xl font-bold text-white mono">45%</div><div class="text-xs text-slate-500 mt-1">organisasi memakai / merencanakan kuantifikasi risiko siber (FAIR)<br><span class="text-slate-600">FAIR Institute 2025 — 90% sukses</span></div></div>
+    <div class="fade-in"><div class="text-3xl font-bold text-white mono">SEC + NIS2</div><div class="text-xs text-slate-500 mt-1">regulasi kini mewajibkan laporan risiko "material" ke level board<br><span class="text-slate-600">SEC Rule 2023 · EU NIS2</span></div></div>
+  </div>
+</section>
+
+<!-- MASALAH -->
+<section id="masalah" class="max-w-6xl mx-auto px-6 py-24">
+  <div class="text-center fade-in">
+    <p class="mono text-red-500 text-xs tracking-[.3em] mb-4">MASALAHNYA</p>
+    <h2 class="text-3xl md:text-4xl font-bold text-white">C-Suite tidak peduli pada kata "SQL Injection".</h2>
+    <p class="mt-4 text-slate-400 max-w-2xl mx-auto">Bagi Direktur Utama, itu urusan staf teknis. Yang membuat mereka tidak bisa tidur adalah angka: berapa data, berapa rupiah, berapa besar reputasi yang dipertaruhkan.</p>
+  </div>
+
+  <div class="mt-14 grid md:grid-cols-2 gap-6">
+    <div class="fade-in rounded-xl border border-slate-800 bg-[#0d1117] p-7">
+      <div class="mono text-xs text-slate-500 mb-4">// ALAT KOMPETITOR — BAHASA MESIN</div>
+      <div class="mono text-sm bg-black/40 rounded-lg p-5 text-slate-400 leading-relaxed border border-slate-800">
+        <span class="text-yellow-500">[!]</span> High Risk: Unsanitized input leading to Boolean-based blind SQLi on <span class="text-slate-300">/api/v1/users?id=</span><br><br>
+        <span class="text-yellow-500">[!]</span> Missing X-Frame-Options header<br>
+        <span class="text-yellow-500">[!]</span> 263 cookies without HttpOnly/SameSite flags<br>
+        <span class="text-yellow-500">[!]</span> External link returns HTTP 404
+      </div>
+      <p class="mt-4 text-sm text-slate-500">Reaksi C-Level: <em class="text-slate-400">"Serahkan ke tim IT."</em> — lalu tidak terjadi apa-apa.</p>
+    </div>
+    <div class="fade-in rounded-xl border border-red-500/40 bg-red-950/10 p-7 glow-red">
+      <div class="mono text-xs text-red-400 mb-4">// PLATFORM VVM — BAHASA BISNIS</div>
+      <div class="text-sm space-y-3">
+        <div class="bg-black/40 rounded-lg p-4 border-l-4 border-red-500"><strong class="text-white">Celah Fatal:</strong> jalur pencarian ini dapat diubah menjadi gerbang pencurian massal — <strong class="text-red-400">32 juta data nasabah</strong> terekspos tanpa kata sandi.</div>
+        <div class="bg-black/40 rounded-lg p-4 border-l-4 border-orange-500"><strong class="text-white">Pemalsuan Identitas:</strong> situs Anda bisa dibingkai situs palsu — penipu meniru tampilan persis brand Anda untuk mencuri data pembaca.</div>
+        <div class="bg-black/40 rounded-lg p-4 border-l-4 border-orange-500"><strong class="text-white">Jejak Pelacak:</strong> 263 pelacak pihak ketiga aktif di browser pembaca Anda — sesi mereka bisa dibajak lewat iklan.</div>
+        <div class="bg-black/40 rounded-lg p-4 border-l-4 border-yellow-500"><strong class="text-white">Reputasi:</strong> halaman Karier Anda menampilkan halaman mati — calon talenta dan publik melihat brand yang terbengkalai.</div>
+      </div>
+      <p class="mt-4 text-sm text-slate-400">Reaksi C-Level: <em class="text-red-400 font-semibold">"Perbaiki malam ini. Berapa biayanya?"</em></p>
+    </div>
+  </div>
+</section>
+
+<!-- DEMO — TOGGLE MODE -->
+<section id="demo" class="border-y border-white/5 bg-[#0d1117] py-24">
+  <div class="max-w-6xl mx-auto px-6">
+    <div class="text-center fade-in">
+      <p class="mono text-red-500 text-xs tracking-[.3em] mb-4">DEMO — HASIL PEMINDAIAN NYATA</p>
+      <h2 class="text-3xl md:text-4xl font-bold text-white">Satu pemindaian. Dua bahasa.</h2>
+      <p class="mt-4 text-slate-400">Output sesungguhnya dari VVM saat memetakan sebuah situs berita — geser untuk melihat translasinya.</p>
+    </div>
+
+    <!-- toggle -->
+    <div class="flex justify-center mt-10 fade-in">
+      <label class="flex items-center gap-4 cursor-pointer select-none">
+        <span class="mono text-sm text-slate-400" id="lblTech">Mode Teknis</span>
+        <div class="relative">
+          <input type="checkbox" id="modeToggle" class="sr-only peer">
+          <div class="w-14 h-7 rounded-full bg-slate-700 peer-checked:bg-red-600 transition"></div>
+          <div class="toggle-dot absolute top-1 left-1 w-5 h-5 rounded-full bg-white"></div>
+        </div>
+        <span class="mono text-sm text-red-400" id="lblExec">Mode Eksekutif</span>
+      </label>
+    </div>
+
+    <!-- findings -->
+    <div id="findings" class="mode-tech mt-10 grid md:grid-cols-2 gap-5 max-w-4xl mx-auto">
+
+      <div class="card-find fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-6">
+        <div class="tech">
+          <div class="mono text-xs text-slate-500 mb-2">PARAMLINK · /store/apps/details</div>
+          <div class="font-semibold text-white">Link with query parameters</div>
+          <div class="mono text-xs text-slate-400 mt-2">id, hl → IDOR, Reflected XSS, SQLi, Open Redirect</div>
+        </div>
+        <div class="exec">
+          <div class="mono text-xs text-red-400 mb-2">RISIKO PENCURIAN DATA</div>
+          <div class="font-semibold text-white">Gerbang menuju database</div>
+          <p class="text-sm text-slate-400 mt-2">Parameter pada tautan ini dapat ditulis ulang penyerang — jalur menuju ekstraksi isi basis data pengguna Anda secara massal.</p>
+        </div>
+      </div>
+
+      <div class="card-find fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-6">
+        <div class="tech">
+          <div class="mono text-xs text-slate-500 mb-2">HEADERS · RESPONSE</div>
+          <div class="font-semibold text-white">Clickjacking exposure</div>
+          <div class="mono text-xs text-slate-400 mt-2">missing X-Frame-Options, CSP frame-ancestors</div>
+        </div>
+        <div class="exec">
+          <div class="mono text-xs text-red-400 mb-2">PEMALSUN IDENTITAS BRAND</div>
+          <div class="font-semibold text-white">Situs Anda bisa ditiru sempurna</div>
+          <p class="text-sm text-slate-400 mt-2">Tanpa proteksi bingkai, situs palsu dapat membungkus tampilan asli Anda — pembaca mengetik data di jebakan yang tampak sah.</p>
+        </div>
+      </div>
+
+      <div class="card-find fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-6">
+        <div class="tech">
+          <div class="mono text-xs text-slate-500 mb-2">COOKIES · 263 NODES</div>
+          <div class="font-semibold text-white">Cookie flag hardening</div>
+          <div class="mono text-xs text-slate-400 mt-2">263 cookies missing Secure/HttpOnly/SameSite</div>
+        </div>
+        <div class="exec">
+          <div class="mono text-xs text-red-400 mb-2">PEMBACA TANPA PELINDUNG</div>
+          <div class="font-semibold text-white">263 pelacak mengekspos pembaca</div>
+          <p class="text-sm text-slate-400 mt-2">Ratusan cookie pihak ketiga tanpa flag pengaman aktif di browser pembaca — sesi mereka bisa dibajak melalui jaringan iklan.</p>
+        </div>
+      </div>
+
+      <div class="card-find fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-6">
+        <div class="tech">
+          <div class="mono text-xs text-slate-500 mb-2">POINTS_TO · VERIFIED</div>
+          <div class="font-semibold text-white">Dead external link + HTTPS→HTTP downgrade</div>
+          <div class="mono text-xs text-slate-400 mt-2">/career → HTTP 404 via http:// leg</div>
+        </div>
+        <div class="exec">
+          <div class="mono text-xs text-red-400 mb-2">REPUTASI &amp; KEPERCAYAAN</div>
+          <div class="font-semibold text-white">Halaman Karier menampilkan jalan buntu</div>
+          <p class="text-sm text-slate-400 mt-2">Tautan karier mengarah ke rantai redirect rusak (HTTPS→HTTP→404). Publik dan calon talenta melihat infrastruktur yang tidak terpelihara.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="text-center text-xs text-slate-600 mt-8 fade-in">Data nyata dari satu pemindaian pasif — 34 elemen, 335 node graph, tanpa satu pun permintaan eksploitasi.</p>
+  </div>
+</section>
+
+<!-- CARA KERJA -->
+<section id="cara" class="max-w-6xl mx-auto px-6 py-24">
+  <div class="text-center fade-in">
+    <p class="mono text-red-500 text-xs tracking-[.3em] mb-4">ARSITEKTUR</p>
+    <h2 class="text-3xl md:text-4xl font-bold text-white">Tiga tahap: fakta → relasi → bahasa manusia.</h2>
+  </div>
+  <div class="mt-14 grid md:grid-cols-3 gap-6">
+    <div class="fade-in rounded-xl border border-slate-800 bg-[#0d1117] p-7">
+      <div class="mono text-red-500 text-sm mb-1">01</div>
+      <h3 class="text-lg font-bold text-white mb-3">Context Ingestion</h3>
+      <p class="text-sm text-slate-400 leading-relaxed">Pemindaian pasif satu kali muat: elemen UI, parameter, tautan, header, cookie, TLS, DNS — dinormalisasi menjadi graph objek bertipe dengan provenance (screenshot + bounding box).</p>
+      <div class="mono text-xs text-slate-600 mt-5 border-t border-slate-800 pt-4">Page · Element · Parameter · Endpoint · Domain · IP · Cookie · Cert</div>
+    </div>
+    <div class="fade-in rounded-xl border border-slate-800 bg-[#0d1117] p-7">
+      <div class="mono text-red-500 text-sm mb-1">02</div>
+      <h3 class="text-lg font-bold text-white mb-3">Impact Synthesis</h3>
+      <p class="text-sm text-slate-400 leading-relaxed">Temuan adalah <em>pola graph</em>, bukan label: <span class="mono text-xs">Input → flows_to → Endpoint → reflects → Page</span>. Setiap edge menyimpan bukti, sehingga rantai serangan muncul sebagai traversal — dengan jalur, bukan tebakan.</p>
+      <div class="mono text-xs text-slate-600 mt-5 border-t border-slate-800 pt-4">Link→Domain(404) = verified BLH · Param(redirect)→external = Open Redirect chain</div>
+    </div>
+    <div class="fade-in rounded-xl border border-red-500/40 bg-red-950/10 p-7 glow-red">
+      <div class="mono text-red-400 text-sm mb-1">03</div>
+      <h3 class="text-lg font-bold text-white mb-3">Executive Translator</h3>
+      <p class="text-sm text-slate-300 leading-relaxed">Template: <span class="mono text-xs text-red-300">[Ancaman] + [Jumlah Aset] + [Dampak Bisnis]</span>. Output layar utama bukan "HTTP 404" melainkan berapa data, rupiah, dan reputasi yang dipertaruhkan.</p>
+      <div class="mono text-xs text-red-300/70 mt-5 border-t border-red-500/20 pt-4">"Amankan 32 juta data nasabah Anda."</div>
+    </div>
+  </div>
+</section>
+
+<!-- NILAI -->
+<section id="nilai" class="border-t border-white/5 bg-[#0d1117] py-24">
+  <div class="max-w-6xl mx-auto px-6">
+    <div class="text-center fade-in">
+      <p class="mono text-red-500 text-xs tracking-[.3em] mb-4">MENGAPA INI MENJUAL</p>
+      <h2 class="text-3xl md:text-4xl font-bold text-white">Anda menjual asuransi, bukan alat.</h2>
+    </div>
+    <div class="mt-14 grid md:grid-cols-3 gap-6 text-sm">
+      <div class="fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-7">
+        <h3 class="font-bold text-white mb-2">Ketakutan yang terukur</h3>
+        <p class="text-slate-400 leading-relaxed">"Anda kena SQL Injection" tidak berarti apa-apa bagi Direktur. "Anda akan kehilangan 32 juta data nasabah" langsung mengaktifkan manajemen risiko perusahaan.</p>
+      </div>
+      <div class="fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-7">
+        <h3 class="font-bold text-white mb-2">Anti alert-fatigue</h3>
+        <p class="text-slate-400 leading-relaxed">Scanner biasa menumpuk 10.000 peringatan Low/Medium. VVM menampilkan sedikit peringatan merah — semuanya dalam bahasa uang, data, dan reputasi.</p>
+      </div>
+      <div class="fade-in rounded-xl border border-slate-800 bg-[#0a0e14] p-7">
+        <h3 class="font-bold text-white mb-2">Posisi setara konsultan</h3>
+        <p class="text-slate-400 leading-relaxed">Bahasa output menempatkan VVM sejajar dengan laporan konsultan keamanan kelas McKinsey/KPMG — bukan scanner open-source gratisan. Direktur yang akan memaksa tim teknisnya memakainya.</p>
+      </div>
+    </div>
+    <div class="fade-in mt-14 rounded-xl border border-slate-800 bg-gradient-to-r from-red-950/30 to-transparent p-8 text-center">
+      <p class="text-slate-300 max-w-2xl mx-auto text-sm leading-relaxed">"Direksi tidak membaca temuan teknis. Mereka membaca <strong class="text-white">konsekuensi</strong>. VVM adalah satu-satunya layer translasi antara permukaan serangan dan ruang rapat."</p>
+    </div>
+  </div>
+</section>
+
+<footer class="border-t border-white/5 py-10 text-center text-xs text-slate-600">
+  <p>VVM / Visual Vulnerability Mapping — pemindaian pasif, satu kali muat, tanpa eksploitasi.</p>
+  <p class="mt-1">Gunakan hanya pada situs milik Anda atau yang berwenang Anda uji.</p>
+</footer>
+
+<script>
+  // Mode toggle: technical <-> executive
+  const t = document.getElementById('modeToggle');
+  const box = document.getElementById('findings');
+  const lt = document.getElementById('lblTech'), le = document.getElementById('lblExec');
+  t.addEventListener('change', () => {
+    box.className = 'mt-10 grid md:grid-cols-2 gap-5 max-w-4xl mx-auto ' + (t.checked ? 'mode-exec' : 'mode-tech');
+    lt.classList.toggle('text-slate-400', !t.checked); lt.classList.toggle('text-slate-600', t.checked);
+    le.classList.toggle('text-red-400', t.checked);   le.classList.toggle('text-slate-600', !t.checked);
+    anime({ targets: '.card-find', opacity: [0, 1], translateY: [12, 0],
+            duration: 500, delay: anime.stagger(60), easing: 'easeOutQuad' });
+  });
+
+  // Scroll-in animations
+  const io = new IntersectionObserver(es => es.forEach(e => {
+    if (e.isIntersecting) {
+      anime({ targets: e.target, opacity: 1, translateY: 0,
+              duration: 700, easing: 'easeOutQuad' });
+      io.unobserve(e.target);
+    }
+  }), { threshold: .12 });
+  document.querySelectorAll('.fade-in').forEach(el => io.observe(el));
+</script>
+</body>
+</html>
