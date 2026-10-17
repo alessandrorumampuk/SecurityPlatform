@@ -1,0 +1,67 @@
+{
+  "generated_by": "verify_tools.py",
+  "generated_at": "2026-10-17T13:46:47.358430",
+  "platforms_tested": [
+    "instagram"
+  ],
+  "retries": 1,
+  "platform_results": {
+    "instagram": {
+      "passed": true,
+      "retries_used": 0,
+      "details": [
+        "  [PASS] fake  'v2aa1cnzgu89tv7n' -> exists=False (expected False)",
+        "  [PASS] fake  'a4db0m2svca3e3vs' -> exists=False (expected False)",
+        "  [PASS] fake  'mgv3ko776dvwzwox' -> exists=False (expected False)",
+        "  [PASS] valid 'instagram' -> exists=True (expected True)",
+        "  [PASS] valid 'cristiano' -> exists=True (expected True)",
+        "  [PASS] valid 'nike' -> exists=True (expected True)"
+      ],
+      "raw_results": [
+        {
+          "username": "v2aa1cnzgu89tv7n",
+          "category": "fake",
+          "expected": false,
+          "actual": false,
+          "passed": true
+        },
+        {
+          "username": "a4db0m2svca3e3vs",
+          "category": "fake",
+          "expected": false,
+          "actual": false,
+          "passed": true
+        },
+        {
+          "username": "mgv3ko776dvwzwox",
+          "category": "fake",
+          "expected": false,
+          "actual": false,
+          "passed": true
+        },
+        {
+          "username": "instagram",
+          "category": "valid",
+          "expected": true,
+          "actual": true,
+          "passed": true
+        },
+        {
+          "username": "cristiano",
+          "category": "valid",
+          "expected": true,
+          "actual": true,
+          "passed": true
+        },
+        {
+          "username": "nike",
+          "category": "valid",
+          "expected": true,
+          "actual": true,
+          "passed": true
+        }
+      ]
+    }
+  },
+  "all_passed": true
+}

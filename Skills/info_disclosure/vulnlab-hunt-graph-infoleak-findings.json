@@ -1,0 +1,9 @@
+{
+  "generated_by": "check_leak.py",
+  "source": "vulnlab-hunt-graph-infoleak-probe.json",
+  "target": "http://127.0.0.1:8765",
+  "checked_at": "2026-10-17T14:33:49",
+  "confirmed": 0,
+  "suspect": 0,
+  "findings": []
+}

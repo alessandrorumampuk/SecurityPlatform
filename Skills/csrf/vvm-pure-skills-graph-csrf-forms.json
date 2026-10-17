@@ -1,0 +1,49 @@
+{
+  "generated_by": "enumerate_forms.py",
+  "url": "http://127.0.0.1:8765/",
+  "status": 200,
+  "enumerated_at": "2026-10-17T15:13:42",
+  "cookies": [],
+  "forms": [
+    {
+      "action": "http://127.0.0.1:8765/search",
+      "method": "get",
+      "state_changing": false,
+      "inputs": [
+        {
+          "name": "q",
+          "type": "text",
+          "value": "",
+          "checked": false
+        }
+      ],
+      "token_fields": []
+    },
+    {
+      "action": "http://127.0.0.1:8765/comment",
+      "method": "post",
+      "state_changing": true,
+      "inputs": [
+        {
+          "name": "role",
+          "type": "hidden",
+          "value": "guest",
+          "checked": false
+        },
+        {
+          "name": "author",
+          "type": "text",
+          "value": "",
+          "checked": false
+        },
+        {
+          "name": "body",
+          "type": "text",
+          "value": "",
+          "checked": false
+        }
+      ],
+      "token_fields": []
+    }
+  ]
+}

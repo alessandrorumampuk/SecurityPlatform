@@ -1,0 +1,174 @@
+{
+  "meta": {
+    "url": "http://localhost/xss/xss2.php",
+    "elements": 3
+  },
+  "nodes": [
+    {
+      "id": "page:http://localhost/xss/xss2.php",
+      "type": "Page",
+      "url": "http://localhost/xss/xss2.php",
+      "http_status": 200,
+      "headers": {},
+      "missing_headers": [
+        "content-security-policy",
+        "x-frame-options",
+        "strict-transport-security",
+        "x-content-type-options",
+        "referrer-policy",
+        "permissions-policy"
+      ]
+    },
+    {
+      "id": "el:1",
+      "type": "Element",
+      "kind": "search",
+      "label": "Search input",
+      "desc": "q",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/f78009ccc92b.png",
+        "bbox": [
+          79.53125,
+          8,
+          153,
+          21
+        ]
+      }
+    },
+    {
+      "id": "param:q",
+      "type": "Parameter",
+      "name": "q",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ]
+    },
+    {
+      "id": "ep:http://localhost/xss/xss2.php",
+      "type": "Endpoint",
+      "url": "http://localhost/xss/xss2.php"
+    },
+    {
+      "id": "el:2",
+      "type": "Element",
+      "kind": "form",
+      "label": "Form",
+      "desc": "",
+      "vulns": [
+        "CSRF"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/f78009ccc92b.png",
+        "bbox": [
+          236.53125,
+          8,
+          58.25,
+          21
+        ]
+      }
+    },
+    {
+      "id": "el:3",
+      "type": "Element",
+      "kind": "form",
+      "label": "Form",
+      "desc": "Pencarian:",
+      "vulns": [
+        "CSRF"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/f78009ccc92b.png",
+        "bbox": [
+          8,
+          8,
+          1424,
+          21
+        ]
+      }
+    },
+    {
+      "id": "dom:localhost",
+      "type": "Domain",
+      "host": "localhost"
+    },
+    {
+      "id": "ip:127.0.0.1",
+      "type": "IP",
+      "addr": "127.0.0.1"
+    },
+    {
+      "id": "ip:::1",
+      "type": "IP",
+      "addr": "::1"
+    }
+  ],
+  "edges": [
+    {
+      "src": "page:http://localhost/xss/xss2.php",
+      "dst": "el:1",
+      "type": "hosts"
+    },
+    {
+      "src": "el:1",
+      "dst": "param:q",
+      "type": "has_param"
+    },
+    {
+      "src": "param:q",
+      "dst": "ep:http://localhost/xss/xss2.php",
+      "type": "flows_to"
+    },
+    {
+      "src": "page:http://localhost/xss/xss2.php",
+      "dst": "el:2",
+      "type": "hosts"
+    },
+    {
+      "src": "page:http://localhost/xss/xss2.php",
+      "dst": "el:3",
+      "type": "hosts"
+    },
+    {
+      "src": "el:3",
+      "dst": "ep:http://localhost/xss/xss2.php",
+      "type": "submits_to"
+    },
+    {
+      "src": "el:3",
+      "dst": "param:q",
+      "type": "has_param"
+    },
+    {
+      "src": "page:http://localhost/xss/xss2.php",
+      "dst": "dom:localhost",
+      "type": "hosted_on"
+    },
+    {
+      "src": "dom:localhost",
+      "dst": "ip:127.0.0.1",
+      "type": "resolves_to"
+    },
+    {
+      "src": "dom:localhost",
+      "dst": "ip:::1",
+      "type": "resolves_to"
+    }
+  ],
+  "findings": [
+    {
+      "vuln": "XSS",
+      "status": "verified",
+      "path": [
+        "page:http://localhost/xss/xss2.php",
+        "param:q"
+      ],
+      "tool": "xss",
+      "evidence": "[V] \" autofocus onfocus=\"alert(1)<!--vvmwsmofa--> -- <input> marker element carries event handler onfocus"
+    }
+  ]
+}

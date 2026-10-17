@@ -1,0 +1,864 @@
+{
+  "meta": {
+    "url": "http://127.0.0.1:8765/",
+    "elements": 22
+  },
+  "nodes": [
+    {
+      "id": "page:http://127.0.0.1:8765/",
+      "type": "Page",
+      "url": "http://127.0.0.1:8765/",
+      "http_status": 200,
+      "headers": {},
+      "missing_headers": [
+        "content-security-policy",
+        "x-frame-options",
+        "strict-transport-security",
+        "x-content-type-options",
+        "referrer-policy",
+        "permissions-policy"
+      ]
+    },
+    {
+      "id": "el:1",
+      "type": "Element",
+      "kind": "search",
+      "label": "Search input",
+      "desc": "Cari berita atau produk...",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          290,
+          251.875,
+          791.3125,
+          32.3125
+        ]
+      }
+    },
+    {
+      "id": "param:q",
+      "type": "Parameter",
+      "name": "q",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ]
+    },
+    {
+      "id": "ep:http://127.0.0.1:8765/search",
+      "type": "Endpoint",
+      "url": "http://127.0.0.1:8765/search"
+    },
+    {
+      "id": "el:2",
+      "type": "Element",
+      "kind": "form",
+      "label": "Form",
+      "desc": "Nama",
+      "vulns": [
+        "CSRF"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          290,
+          2302.625,
+          791.3125,
+          32.3125
+        ]
+      }
+    },
+    {
+      "id": "el:3",
+      "type": "Element",
+      "kind": "comment",
+      "label": "Comment / text area",
+      "desc": "Tulis komentar...",
+      "vulns": [
+        "XSS"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          290,
+          2342.9375,
+          789.3125,
+          45.3125
+        ]
+      }
+    },
+    {
+      "id": "el:4",
+      "type": "Element",
+      "kind": "form",
+      "label": "Form",
+      "desc": "Cari",
+      "vulns": [
+        "CSRF"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          290,
+          247.875,
+          860,
+          40.3125
+        ]
+      }
+    },
+    {
+      "id": "el:5",
+      "type": "Element",
+      "kind": "form",
+      "label": "Form",
+      "desc": "Kirim",
+      "vulns": [
+        "CSRF"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          290,
+          2298.625,
+          860,
+          117.625
+        ]
+      }
+    },
+    {
+      "id": "ep:http://127.0.0.1:8765/comment",
+      "type": "Endpoint",
+      "url": "http://127.0.0.1:8765/comment"
+    },
+    {
+      "id": "el:6",
+      "type": "Element",
+      "kind": "iframe",
+      "label": "iframe",
+      "desc": "",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          290,
+          477.8125,
+          504,
+          84
+        ]
+      }
+    },
+    {
+      "id": "el:7",
+      "type": "Element",
+      "kind": "paramlink",
+      "label": "Link with query parameters",
+      "desc": "Profile",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          411.65625,
+          32,
+          50.40625,
+          18
+        ]
+      }
+    },
+    {
+      "id": "dom:127.0.0.1",
+      "type": "Domain",
+      "host": "127.0.0.1"
+    },
+    {
+      "id": "param:id",
+      "type": "Parameter",
+      "name": "id",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ]
+    },
+    {
+      "id": "ep:http://127.0.0.1:8765/profile",
+      "type": "Endpoint",
+      "url": "http://127.0.0.1:8765/profile"
+    },
+    {
+      "id": "el:8",
+      "type": "Element",
+      "kind": "paramlink",
+      "label": "Link with query parameters",
+      "desc": "Kaos VVM",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          330,
+          356,
+          74.59375,
+          18
+        ]
+      }
+    },
+    {
+      "id": "ep:http://127.0.0.1:8765/product",
+      "type": "Endpoint",
+      "url": "http://127.0.0.1:8765/product"
+    },
+    {
+      "id": "el:9",
+      "type": "Element",
+      "kind": "paramlink",
+      "label": "Link with query parameters",
+      "desc": "Sticker Pack",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          330,
+          374,
+          89.515625,
+          18
+        ]
+      }
+    },
+    {
+      "id": "el:10",
+      "type": "Element",
+      "kind": "paramlink",
+      "label": "Link with query parameters",
+      "desc": "Hoodie",
+      "vulns": [
+        "XSS",
+        "Information Disclosure"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          330,
+          392,
+          51.828125,
+          18
+        ]
+      }
+    },
+    {
+      "id": "el:11",
+      "type": "Element",
+      "kind": "sociallink",
+      "label": "Social media link (BLH scope)",
+      "desc": "Twitter",
+      "vulns": [
+        "Broken Link Hijacking"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          355.3125,
+          2436.25,
+          42.8125,
+          16
+        ]
+      }
+    },
+    {
+      "id": "dom:twitter.com",
+      "type": "Domain",
+      "host": "twitter.com"
+    },
+    {
+      "id": "el:12",
+      "type": "Element",
+      "kind": "blanklink",
+      "label": "target=_blank link",
+      "desc": "Twitter",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          355.3125,
+          2436.25,
+          42.8125,
+          16
+        ]
+      }
+    },
+    {
+      "id": "el:13",
+      "type": "Element",
+      "kind": "sociallink",
+      "label": "Social media link (BLH scope)",
+      "desc": "Instagram",
+      "vulns": [
+        "Broken Link Hijacking"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          409.28125,
+          2436.25,
+          61.71875,
+          16
+        ]
+      }
+    },
+    {
+      "id": "dom:www.instagram.com",
+      "type": "Domain",
+      "host": "www.instagram.com"
+    },
+    {
+      "id": "el:14",
+      "type": "Element",
+      "kind": "blanklink",
+      "label": "target=_blank link",
+      "desc": "Instagram",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          409.28125,
+          2436.25,
+          61.71875,
+          16
+        ]
+      }
+    },
+    {
+      "id": "el:15",
+      "type": "Element",
+      "kind": "sociallink",
+      "label": "Social media link (BLH scope)",
+      "desc": "TikTok",
+      "vulns": [
+        "Broken Link Hijacking"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          482.15625,
+          2436.25,
+          39.796875,
+          16
+        ]
+      }
+    },
+    {
+      "id": "dom:www.tiktok.com",
+      "type": "Domain",
+      "host": "www.tiktok.com"
+    },
+    {
+      "id": "el:16",
+      "type": "Element",
+      "kind": "blanklink",
+      "label": "target=_blank link",
+      "desc": "TikTok",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          482.15625,
+          2436.25,
+          39.796875,
+          16
+        ]
+      }
+    },
+    {
+      "id": "el:17",
+      "type": "Element",
+      "kind": "sociallink",
+      "label": "Social media link (BLH scope)",
+      "desc": "Telegram",
+      "vulns": [
+        "Broken Link Hijacking"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          533.109375,
+          2436.25,
+          57.109375,
+          16
+        ]
+      }
+    },
+    {
+      "id": "dom:t.me",
+      "type": "Domain",
+      "host": "t.me"
+    },
+    {
+      "id": "el:18",
+      "type": "Element",
+      "kind": "blanklink",
+      "label": "target=_blank link",
+      "desc": "Telegram",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          533.109375,
+          2436.25,
+          57.109375,
+          16
+        ]
+      }
+    },
+    {
+      "id": "el:19",
+      "type": "Element",
+      "kind": "sociallink",
+      "label": "Social media link (BLH scope)",
+      "desc": "Twitter (lama)",
+      "vulns": [
+        "Broken Link Hijacking"
+      ],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          601.375,
+          2436.25,
+          85.71875,
+          16
+        ]
+      }
+    },
+    {
+      "id": "el:20",
+      "type": "Element",
+      "kind": "blanklink",
+      "label": "target=_blank link",
+      "desc": "Twitter (lama)",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          601.375,
+          2436.25,
+          85.71875,
+          16
+        ]
+      }
+    },
+    {
+      "id": "el:21",
+      "type": "Element",
+      "kind": "weblink",
+      "label": "Network (external link)",
+      "desc": "Portal Promo 2023",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          698.25,
+          2436.25,
+          116.28125,
+          16
+        ]
+      }
+    },
+    {
+      "id": "dom:promo-vulnlab-2023-nonexistent-domain-987654.com",
+      "type": "Domain",
+      "host": "promo-vulnlab-2023-nonexistent-domain-987654.com"
+    },
+    {
+      "id": "el:22",
+      "type": "Element",
+      "kind": "blanklink",
+      "label": "target=_blank link",
+      "desc": "Portal Promo 2023",
+      "vulns": [],
+      "prov": {
+        "screenshot": "/Users/alessandrorumampuk/Documents/GitHub/AlessandroStudyNotes/AlessandroStudyNotes/Cybersecurity/SecurityPlatform/log/web/cf71b27b94d3.png",
+        "bbox": [
+          698.25,
+          2436.25,
+          116.28125,
+          16
+        ]
+      }
+    },
+    {
+      "id": "ip:127.0.0.1",
+      "type": "IP",
+      "addr": "127.0.0.1"
+    }
+  ],
+  "edges": [
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:1",
+      "type": "hosts"
+    },
+    {
+      "src": "el:1",
+      "dst": "param:q",
+      "type": "has_param"
+    },
+    {
+      "src": "param:q",
+      "dst": "ep:http://127.0.0.1:8765/search",
+      "type": "flows_to"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:2",
+      "type": "hosts"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:3",
+      "type": "hosts"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:4",
+      "type": "hosts"
+    },
+    {
+      "src": "el:4",
+      "dst": "ep:http://127.0.0.1:8765/search",
+      "type": "submits_to"
+    },
+    {
+      "src": "el:4",
+      "dst": "param:q",
+      "type": "has_param"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:5",
+      "type": "hosts"
+    },
+    {
+      "src": "el:5",
+      "dst": "ep:http://127.0.0.1:8765/comment",
+      "type": "submits_to"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:6",
+      "type": "hosts"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:7",
+      "type": "hosts"
+    },
+    {
+      "src": "el:7",
+      "dst": "dom:127.0.0.1",
+      "type": "points_to",
+      "href": "http://127.0.0.1:8765/profile?id=1"
+    },
+    {
+      "src": "el:7",
+      "dst": "param:id",
+      "type": "has_param"
+    },
+    {
+      "src": "param:id",
+      "dst": "ep:http://127.0.0.1:8765/profile",
+      "type": "flows_to"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:8",
+      "type": "hosts"
+    },
+    {
+      "src": "el:8",
+      "dst": "dom:127.0.0.1",
+      "type": "points_to",
+      "href": "http://127.0.0.1:8765/product?id=1"
+    },
+    {
+      "src": "el:8",
+      "dst": "param:id",
+      "type": "has_param"
+    },
+    {
+      "src": "param:id",
+      "dst": "ep:http://127.0.0.1:8765/product",
+      "type": "flows_to"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:9",
+      "type": "hosts"
+    },
+    {
+      "src": "el:9",
+      "dst": "dom:127.0.0.1",
+      "type": "points_to",
+      "href": "http://127.0.0.1:8765/product?id=2"
+    },
+    {
+      "src": "el:9",
+      "dst": "param:id",
+      "type": "has_param"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:10",
+      "type": "hosts"
+    },
+    {
+      "src": "el:10",
+      "dst": "dom:127.0.0.1",
+      "type": "points_to",
+      "href": "http://127.0.0.1:8765/product?id=3"
+    },
+    {
+      "src": "el:10",
+      "dst": "param:id",
+      "type": "has_param"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:11",
+      "type": "hosts"
+    },
+    {
+      "src": "el:11",
+      "dst": "dom:twitter.com",
+      "type": "points_to",
+      "href": "https://twitter.com/vulnlab_id"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:12",
+      "type": "hosts"
+    },
+    {
+      "src": "el:12",
+      "dst": "dom:twitter.com",
+      "type": "points_to",
+      "href": "https://twitter.com/vulnlab_id"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:13",
+      "type": "hosts"
+    },
+    {
+      "src": "el:13",
+      "dst": "dom:www.instagram.com",
+      "type": "points_to",
+      "href": "https://www.instagram.com/vulnlab.id"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:14",
+      "type": "hosts"
+    },
+    {
+      "src": "el:14",
+      "dst": "dom:www.instagram.com",
+      "type": "points_to",
+      "href": "https://www.instagram.com/vulnlab.id"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:15",
+      "type": "hosts"
+    },
+    {
+      "src": "el:15",
+      "dst": "dom:www.tiktok.com",
+      "type": "points_to",
+      "href": "https://www.tiktok.com/@vulnlab"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:16",
+      "type": "hosts"
+    },
+    {
+      "src": "el:16",
+      "dst": "dom:www.tiktok.com",
+      "type": "points_to",
+      "href": "https://www.tiktok.com/@vulnlab"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:17",
+      "type": "hosts"
+    },
+    {
+      "src": "el:17",
+      "dst": "dom:t.me",
+      "type": "points_to",
+      "href": "https://t.me/vulnlab"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:18",
+      "type": "hosts"
+    },
+    {
+      "src": "el:18",
+      "dst": "dom:t.me",
+      "type": "points_to",
+      "href": "https://t.me/vulnlab"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:19",
+      "type": "hosts"
+    },
+    {
+      "src": "el:19",
+      "dst": "dom:twitter.com",
+      "type": "points_to",
+      "href": "https://twitter.com/vulnlab_official_lama2022"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:20",
+      "type": "hosts"
+    },
+    {
+      "src": "el:20",
+      "dst": "dom:twitter.com",
+      "type": "points_to",
+      "href": "https://twitter.com/vulnlab_official_lama2022"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:21",
+      "type": "hosts"
+    },
+    {
+      "src": "el:21",
+      "dst": "dom:promo-vulnlab-2023-nonexistent-domain-987654.com",
+      "type": "points_to",
+      "href": "https://promo-vulnlab-2023-nonexistent-domain-987654.com/"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "el:22",
+      "type": "hosts"
+    },
+    {
+      "src": "el:22",
+      "dst": "dom:promo-vulnlab-2023-nonexistent-domain-987654.com",
+      "type": "points_to",
+      "href": "https://promo-vulnlab-2023-nonexistent-domain-987654.com/"
+    },
+    {
+      "src": "page:http://127.0.0.1:8765/",
+      "dst": "dom:127.0.0.1",
+      "type": "hosted_on"
+    },
+    {
+      "src": "dom:127.0.0.1",
+      "dst": "ip:127.0.0.1",
+      "type": "resolves_to"
+    }
+  ],
+  "findings": [
+    {
+      "vuln": "Information Disclosure",
+      "status": "verified",
+      "path": [
+        "page:http://127.0.0.1:8765/"
+      ],
+      "tool": "info_disclosure",
+      "evidence": "GET http://127.0.0.1:8765/.env -> 200 [CONFIRMED/critical] env: APP_KEY \u00b7 env: DB_* \u00b7 env: cloud creds \u00b7 DB conn string w/ creds secrets: AKIAIO\u2026, APP_KE\u2026"
+    },
+    {
+      "vuln": "Information Disclosure",
+      "status": "verified",
+      "path": [
+        "page:http://127.0.0.1:8765/"
+      ],
+      "tool": "info_disclosure",
+      "evidence": "GET http://127.0.0.1:8765/.git/HEAD -> 200 [CONFIRMED/critical] git HEAD"
+    },
+    {
+      "vuln": "Information Disclosure",
+      "status": "verified",
+      "path": [
+        "page:http://127.0.0.1:8765/"
+      ],
+      "tool": "info_disclosure",
+      "evidence": "GET http://127.0.0.1:8765/.git/config -> 200 [CONFIRMED/high] git config"
+    },
+    {
+      "vuln": "XSS",
+      "status": "verified",
+      "path": [
+        "page:http://127.0.0.1:8765/",
+        "param:q"
+      ],
+      "tool": "xss",
+      "evidence": "[V] <script vvmitvnkg>alert(1)</script> -- marker inside <script> element"
+    },
+    {
+      "vuln": "XSS",
+      "status": "verified",
+      "path": [
+        "page:http://127.0.0.1:8765/",
+        "param:q"
+      ],
+      "tool": "xss",
+      "evidence": "[V] <script vvmuywkre>alert`1`</script> -- marker inside <script> element"
+    },
+    {
+      "vuln": "XSS",
+      "status": "verified",
+      "path": [
+        "page:http://127.0.0.1:8765/",
+        "param:q"
+      ],
+      "tool": "xss",
+      "evidence": "[V] <script vvmemiipd>confirm(1)</script> -- marker inside <script> element"
+    },
+    {
+      "vuln": "CSRF",
+      "status": "verified",
+      "path": [
+        "el:5"
+      ],
+      "tool": "csrf",
+      "evidence": "http://127.0.0.1:8765/comment -- accepted mutations: no_origin, foreign_origin; no token field (no session needed -- anonymous state change)"
+    },
+    {
+      "vuln": "Broken Link Hijacking",
+      "status": "verified",
+      "path": [
+        "el:13",
+        "dom:www.instagram.com"
+      ],
+      "tool": "broken_link_hijacking",
+      "evidence": "https://www.instagram.com/vulnlab.id -- platform checker evaluated page: profile not found (status=200)"
+    },
+    {
+      "vuln": "Broken Link Hijacking",
+      "status": "candidate",
+      "path": [
+        "el:15",
+        "dom:www.tiktok.com"
+      ],
+      "tool": "broken_link_hijacking",
+      "evidence": "https://www.tiktok.com/@vulnlab -- checker status CAPTCHA; needs manual review"
+    }
+  ]
+}

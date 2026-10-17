@@ -1,0 +1,9 @@
+{
+  "generated_by": "check_leak.py",
+  "source": "386cacfc5079-graph-infoleak-probe.json",
+  "target": "http://localhost",
+  "checked_at": "2026-10-17T16:43:44",
+  "confirmed": 0,
+  "suspect": 0,
+  "findings": []
+}

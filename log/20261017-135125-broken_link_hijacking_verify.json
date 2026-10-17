@@ -1,0 +1,67 @@
+{
+  "generated_by": "verify_tools.py",
+  "generated_at": "2026-10-17T13:47:14.920642",
+  "platforms_tested": [
+    "tiktok"
+  ],
+  "retries": 1,
+  "platform_results": {
+    "tiktok": {
+      "passed": false,
+      "retries_used": 1,
+      "details": [
+        "  [PASS] fake  '@jhq8y7acpn6zg8ek' -> exists=False (expected False)",
+        "  [PASS] fake  '@aplsh7883vgd18e5' -> exists=False (expected False)",
+        "  [PASS] fake  '@lhtosn92qs0pp20l' -> exists=False (expected False)",
+        "  [FAIL] valid '@tiktok' -> exists=False (expected True)",
+        "  [FAIL] valid '@khaby.lame' -> exists=False (expected True)",
+        "  [FAIL] valid '@nike' -> exists=False (expected True)"
+      ],
+      "raw_results": [
+        {
+          "username": "@jhq8y7acpn6zg8ek",
+          "category": "fake",
+          "expected": false,
+          "actual": false,
+          "passed": true
+        },
+        {
+          "username": "@aplsh7883vgd18e5",
+          "category": "fake",
+          "expected": false,
+          "actual": false,
+          "passed": true
+        },
+        {
+          "username": "@lhtosn92qs0pp20l",
+          "category": "fake",
+          "expected": false,
+          "actual": false,
+          "passed": true
+        },
+        {
+          "username": "@tiktok",
+          "category": "valid",
+          "expected": true,
+          "actual": false,
+          "passed": false
+        },
+        {
+          "username": "@khaby.lame",
+          "category": "valid",
+          "expected": true,
+          "actual": false,
+          "passed": false
+        },
+        {
+          "username": "@nike",
+          "category": "valid",
+          "expected": true,
+          "actual": false,
+          "passed": false
+        }
+      ]
+    }
+  },
+  "all_passed": false
+}

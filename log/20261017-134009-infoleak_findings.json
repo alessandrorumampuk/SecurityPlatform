@@ -1,0 +1,37 @@
+{
+  "generated_by": "check_leak.py",
+  "source": "20261017-133905-infoleak_probe.json",
+  "target": "http://127.0.0.1:8899",
+  "checked_at": "2026-10-17T13:40:09",
+  "confirmed": 2,
+  "suspect": 0,
+  "findings": [
+    {
+      "path": "/.env",
+      "status": 200,
+      "grade": "CONFIRMED",
+      "severity": "critical",
+      "evidence": [
+        "env: APP_KEY",
+        "env: DB_*",
+        "env: cloud creds",
+        "format:generic_secret"
+      ],
+      "secrets_redacted": [
+        "Xk9mPx\u2026"
+      ],
+      "sha256": "63517cc2b2800c471830096d474b8b7f9b873ec635c56ecbbc322b52680641a5"
+    },
+    {
+      "path": "/.git/HEAD",
+      "status": 200,
+      "grade": "CONFIRMED",
+      "severity": "critical",
+      "evidence": [
+        "git HEAD"
+      ],
+      "secrets_redacted": [],
+      "sha256": "28d25bf82af4c0e2b72f50959b2beb859e3e60b9630a5e8c603dad4ddb2b6e80"
+    }
+  ]
+}
