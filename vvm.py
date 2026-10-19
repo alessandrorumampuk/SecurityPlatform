@@ -457,6 +457,7 @@ XSS_DIR = SKILLS_DIR / "xss"
 INFOLEAK_DIR = SKILLS_DIR / "info_disclosure"
 CSRF_DIR = SKILLS_DIR / "csrf"
 BLH_DIR = SKILLS_DIR / "broken_link_hijacking"
+DIRLIST_DIR = SKILLS_DIR / "directory_listing"
 
 # Statuses meaning a BLH checker never actually evaluated the page
 # (same convention as verify_tools.py -- an error/captcha is not a
@@ -510,10 +511,10 @@ def hunt_infoleak(page_url, stem):
 
     probe = stem + "-infoleak-probe.json"
     graded = stem + "-infoleak-findings.json"
-    print(f"  [info_disclosure] probing {origin} (82 paths)...")
+    print(f"  [info_disclosure] probing {origin} (199 paths)...")
     _skill_run(INFOLEAK_DIR / "probe_paths.py",
                "--url", origin, "--out", probe, "--delay", "0.15",
-               timeout=150)
+               timeout=300)
     _skill_run(INFOLEAK_DIR / "check_leak.py",
                "--file", probe, "--out", graded, timeout=60)
     data = _read_json(graded)
@@ -547,6 +548,35 @@ def hunt_infoleak(page_url, stem):
                 tool="info_disclosure/trigger_errors",
                 evidence=(f"{f.get('param')}={f.get('mutation')!r} -> "
                           f"HTTP {f.get('status')} [{grade}] {sigs}")))
+    return finds
+
+
+def hunt_dirlist(page_url, stem):
+    """directory_listing skill: probe listing-prone dirs on the origin,
+    flag sensitive filenames inside any open Index-of page."""
+    u = urllib.parse.urlsplit(page_url)
+    origin = f"{u.scheme}://{u.netloc}"
+    out = stem + "-dirlist.json"
+    print(f"  [dirlist] probing {origin} for open directory listings...")
+    _skill_run(DIRLIST_DIR / "directory_listing.py",
+               "--url", origin, "--out", out, "--delay", "0.15",
+               timeout=150)
+    data = _read_json(out)
+    finds = []
+    for d in (data or {}).get("listings", []):
+        sens = d.get("sensitive") or []
+        sens_s = ", ".join(
+            f"{s['name']} [{','.join(s['match'])}]" for s in sens[:5])
+        finds.append(dict(
+            vuln="Directory Listing",
+            status="verified" if sens else "candidate",
+            path=["page:" + page_url],
+            tool="dirlist",
+            evidence=(f"{d.get('method', 'GET')} {d['url']} -> "
+                      f"{d.get('status', 200)} Index-of "
+                      f"({d.get('server') or 'server?'}); "
+                      f"{d.get('file_count', 0)} entries"
+                      + (f"; sensitive: {sens_s}" if sens_s else ""))))
     return finds
 
 
@@ -727,7 +757,7 @@ def hunt_csrf(graph, page_url, stem, cookie):
     return finds
 
 
-SKILL_IDS = ("xss", "info_disclosure", "csrf", "blh")
+SKILL_IDS = ("xss", "info_disclosure", "csrf", "blh", "dirlist")
 
 
 def hunt_skills(graph, data, page_url, stem, max_xss, cookie="",
@@ -740,6 +770,8 @@ def hunt_skills(graph, data, page_url, stem, max_xss, cookie="",
     finds = []
     if "info_disclosure" in only:
         finds += hunt_infoleak(page_url, stem)
+    if "dirlist" in only:
+        finds += hunt_dirlist(page_url, stem)
     if "xss" in only:
         finds += hunt_xss(page_url, stem, max_xss)
     if "csrf" in only:
@@ -761,7 +793,7 @@ def main():
                          "findings. All verdicts come from the skills.")
     ap.add_argument("--skills", default="",
                     help="Comma subset for --hunt: xss, info_disclosure, "
-                         "csrf, blh (default: all four)")
+                         "csrf, blh, dirlist (default: all five)")
     ap.add_argument("--hunt-max-xss", type=int, default=3,
                     help="Max parameterized URLs to run the xss pipeline on "
                          "(default 3)")

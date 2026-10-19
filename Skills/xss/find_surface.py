@@ -51,12 +51,20 @@ class SurfaceParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.host = host
         self.links = []          # absolute hrefs with a query
+        self.embedded = []       # query URLs in non-anchor attrs (iframe,
+                                 # data-*, formaction, meta refresh, ...)
         self.forms = []          # {action, method, fields:[names]}
         self.scripts = []        # inline script bodies
         self.script_srcs = []    # same-host external script URLs
         self._form = None        # form currently being parsed
         self._in_script = False
         self._script_buf = []
+
+    def _collect_embedded(self, raw):
+        u = self._absolute(self._base, raw)
+        if u and urllib.parse.urlsplit(u).hostname == self.host \
+                and urllib.parse.urlsplit(u).query:
+            self.embedded.append(u)
 
     def _absolute(self, base, href):
         try:
@@ -93,6 +101,28 @@ class SurfaceParser(HTMLParser):
             if name and ftype not in ("hidden", "submit", "button",
                                       "image", "reset"):
                 self._form["fields"].append(name)
+
+        # query-bearing URLs hide outside <a href> too: embedded frames,
+        # per-button formaction overrides, meta refresh targets, and
+        # SPA-style data-* URL stashes all hit real endpoints.
+        if tag == "meta" and \
+                "refresh" in (d.get("http-equiv") or "").lower():
+            m = re.search(r"url\s*=\s*([^;]+)", d.get("content") or "",
+                          re.I)
+            if m:
+                self._collect_embedded(m.group(1).strip(" '\""))
+        elif tag in ("iframe", "frame", "embed", "object", "video",
+                     "audio", "source", "track", "area", "base"):
+            for k in ("src", "data", "href", "poster"):
+                if d.get(k):
+                    self._collect_embedded(d[k])
+        for k, v in d.items():
+            if not v:
+                continue
+            if k == "formaction" or (k.startswith("data-") and any(
+                    t in k for t in ("url", "href", "src", "link",
+                                     "api", "ajax", "endpoint"))):
+                self._collect_embedded(v)
 
     def handle_endtag(self, tag):
         if tag == "form" and self._form is not None:
@@ -136,6 +166,28 @@ _DOM_SEARCH_RE = re.compile(
 _DOM_HASH_RE = re.compile(r"location\.hash\b")
 _DOM_PATH_RE = re.compile(r"location\.pathname\b")
 
+# JSONP-style callback params reflect the value back inside a JS call —
+# a script src carrying one is its own reflected-XSS channel.
+_CALLBACK_RE = re.compile(
+    r"^(callback|cb|jsonp|jsonpcallback|json_callback|jsonpcb|call|"
+    r"func|method|cbfn|onload)$", re.I)
+
+# Non-URL DOM sources + sinks: annotates the dom_* templates. postMessage
+# reads are attacker-controllable but cannot be expressed as a URL
+# template, so they are reported as a note rather than a target.
+_POSTMSG_RE = re.compile(
+    r"""addEventListener\(\s*["']message["']|\.onmessage\s*=""")
+_SINKS = {
+    "innerHTML": re.compile(r"\.innerHTML\s*="),
+    "outerHTML": re.compile(r"\.outerHTML\s*="),
+    "document.write": re.compile(r"document\.write(?:ln)?\s*\("),
+    "eval()": re.compile(r"\beval\s*\("),
+    "new Function()": re.compile(r"new\s+Function\s*\("),
+    "setTimeout(string)": re.compile(r"""setTimeout\s*\(\s*["']"""),
+    "insertAdjacentHTML": re.compile(r"insertAdjacentHTML\s*\("),
+    ".html()": re.compile(r"\.html\s*\("),
+}
+
 
 def dom_source_params(script_texts):
     """Return (param_names, reads_search, reads_hash, reads_path)."""
@@ -149,6 +201,14 @@ def dom_source_params(script_texts):
         if _DOM_PATH_RE.search(src):
             path = True
     return names, search, hash_, path
+
+
+def dom_extras(script_texts):
+    """Return (postmessage_source_seen, sorted_sink_names)."""
+    postmsg = any(_POSTMSG_RE.search(s) for s in script_texts)
+    sinks = sorted(n for n, rx in _SINKS.items()
+                   if any(rx.search(s) for s in script_texts))
+    return postmsg, sinks
 
 
 def find_surface(url, timeout=15):
@@ -179,13 +239,30 @@ def find_surface(url, timeout=15):
         for tpl, key in param_templates(href, host):
             push(tpl, key, "link_param")
 
-    # 3. GET form fields -> URL params
+    # 2b. query params on non-anchor elements/attrs (iframes, data-*,
+    #     formaction, meta refresh, ...)
+    for href in p.embedded:
+        for tpl, key in param_templates(href, host):
+            push(tpl, key, "embedded_param")
+
+    # 2c. same-host <script src> params — JSONP callbacks reflect into a
+    #     JS context without ever appearing in markup.
+    for src in p.script_srcs:
+        for tpl, key in param_templates(src, host):
+            push(tpl, key,
+                 "jsonp_param" if _CALLBACK_RE.match(key)
+                 else "script_param")
+
+    # 3. GET form fields -> URL params; the action URL's own params are
+    #    reflected surface too regardless of method.
     post_forms = []
     for f in p.forms:
         action = f["action"] or base
         u = urllib.parse.urljoin(base, action)
         if urllib.parse.urlsplit(u).hostname != host:
             continue
+        for tpl, key in param_templates(u, host):
+            push(tpl, key, "form_action")
         if f["method"] == "get":
             for name in f["fields"]:
                 tpl = u.split("?")[0] + f"?{name}={PLACEHOLDER}"
@@ -208,6 +285,7 @@ def find_surface(url, timeout=15):
     base_nf = urllib.parse.urlunsplit(u_base._replace(fragment=""))
     joiner = "&" if u_base.query else "?"
     dom_names, dom_search, dom_hash, dom_path = dom_source_params(script_texts)
+    postmsg, sinks = dom_extras(script_texts)
     for name in sorted(dom_names):
         push(f"{base_nf}{joiner}{name}={PLACEHOLDER}", name, "dom_param")
     if dom_search:
@@ -217,7 +295,7 @@ def find_surface(url, timeout=15):
     if dom_path:
         push(f"{base_nf.rstrip('/')}/{PLACEHOLDER}", "path", "dom_path")
 
-    return targets, post_forms
+    return targets, post_forms, {"postmessage": postmsg, "sinks": sinks}
 
 
 def main():
@@ -230,13 +308,14 @@ def main():
                     help="Cap number of targets (0 = no cap)")
     args = ap.parse_args()
 
-    targets, post_forms = find_surface(args.url)
+    targets, post_forms, extras = find_surface(args.url)
     if args.max:
         targets = targets[:args.max]
 
     result = {"url": args.url,
               "targets": targets,
               "post_forms": post_forms,
+              "dom_extras": extras,
               "target_count": len(targets)}
 
     payload = json.dumps(result, indent=2)
@@ -254,6 +333,11 @@ def main():
     for f in post_forms:
         print(f"  [{'post_form':11}] {','.join(f['fields']) or '-':20} "
               f"POST {f['action'][:80]}")
+    if extras["postmessage"]:
+        print("  note: 'message' event listener found — postMessage "
+              "DOM-XSS surface (needs a crafted postMessage, not a URL)")
+    if extras["sinks"]:
+        print(f"  note: DOM sinks present: {', '.join(extras['sinks'])}")
     print(f"saved -> {args.out or log_path}")
 
 

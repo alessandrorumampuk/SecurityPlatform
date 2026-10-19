@@ -42,6 +42,10 @@ KEYWORDS = [
     # complete tags while letting the bare '<img' name through
     ("img_tag", "<img>"),
     ("entity_lt", "&lt;"),
+    # '&#101;' must return verbatim for the entity-encoded-fn bypass
+    # (al&#101;rt): '&' -> '&amp;' or '#' stripped means char refs are
+    # dead on arrival — skip that bypass path entirely.
+    ("char_ref", "&#101;"),
     ("srcdoc", "srcdoc"),
     ("onload", "onload"),
     ("ontoggle", "ontoggle"),
@@ -102,10 +106,32 @@ def keyword_items():
     The random tag is inserted BEFORE the first '<'-bearing item: denylist
     regexes such as /<script[^>]*>/ match forward to the next '>', so an
     unclosed item like '</script' would swallow the random tag into its
-    match and it would report 'encoded' instead of 'removed'."""
+    match and it would report 'encoded' instead of 'removed'.
+
+    gen_* items are generic-shape control probes: one benign random
+    identifier tests whether the CALL/JUNCTION shape is blocked
+    independent of any dangerous fn name. gen_call is the control — if
+    it fails, every ()-bearing variant below is dead too. All probes
+    carrying '>' must precede the first unclosed '</' item (a forward-
+    matching stripper regex would swallow them into its match), so the
+    block is inserted before close_script."""
     items = list(KEYWORDS)
     idx = next((i for i, (_, v) in enumerate(items) if "<" in v), len(items))
     items.insert(idx, ("rand_tag", f"<{random_tag_name()}>"))
+    i = random_tag_name()
+    gen = [
+        ("gen_call", f"{i}()"),
+        ("gen_tick", f"{i}`1`"),
+        ("gen_script", f"<script>{i}()</script>"),
+        ("gen_handler", f"<svg onload={i}()>"),
+        ("gen_h_error", f"<img onerror={i}()>"),
+        ("gen_jsurl", f"javascript:{i}()"),
+        ("gen_break_squote", f"'-{i}()-'"),
+        ("gen_break_dquote", f'"-{i}()-"'),
+    ]
+    ci = next((n for n, (_, v) in enumerate(items) if v.startswith("</")),
+              len(items))
+    items[ci:ci] = gen
     return items
 
 

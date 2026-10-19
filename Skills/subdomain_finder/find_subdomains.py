@@ -229,6 +229,43 @@ def wildcard_ips(domain: str):
 # Scraping: pull *.domain references out of the target's own HTML/JS
 # --------------------------------------------------------------------------
 
+def extract_subdomains_from_html(html_text: str, domain: str) -> set:
+    """Pull <label>.<domain> references out of raw page HTML.
+
+    Moved here from social_media_crawler so subdomain extraction lives in
+    one place. Catches names embedded anywhere in the page (text, JS
+    strings, attributes), including multi-label chains. HTML entities are
+    decoded first and JS unicode-escape prefixes (u003e, x003e) stripped,
+    so escaped markup cannot corrupt the captured label.
+    Returns bare hostnames under `domain` (never the apex itself).
+    """
+    import html as html_module
+    decoded = html_module.unescape(html_text)
+    # Dot is excluded on both sides too, so a name like
+    # "evil.<domain>.evil.com" contributes nothing instead of yielding a
+    # phantom "<label>.<domain>" match.
+    matches = re.findall(
+        rf'(?<![a-z0-9\-.])((?:[a-z0-9\-]+\.)+{re.escape(domain)})'
+        rf'(?![a-z0-9\-.])',
+        decoded, re.IGNORECASE)
+
+    out = set()
+    for name in matches:
+        name = name.strip().lower().rstrip(".")
+        if not name or name == domain:
+            continue
+        name = re.sub(r'^[ux]\d{3,4}e', '', name)
+        name = re.sub(r'^[^a-z0-9]+', '', name)
+        if not name or name == domain:
+            continue
+        if not re.match(r'^[a-z0-9\-]+(\.[a-z0-9\-]+)+$', name):
+            continue
+        if not name.endswith('.' + domain):
+            continue
+        out.add(name)
+    return out
+
+
 class RefParser(HTMLParser):
     """Collect same-domain asset URLs (script src / link href) to fetch."""
 
@@ -250,7 +287,7 @@ class RefParser(HTMLParser):
 
 
 def fetch(url: str, timeout=10, limit=1_500_000):
-    """GET a page, return (final_url, text) or (url, None)."""
+    """GET a page, return (final_url, text, status) or (url, None, None)."""
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         import ssl
@@ -258,13 +295,14 @@ def fetch(url: str, timeout=10, limit=1_500_000):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            return r.url, r.read(limit).decode("utf-8", errors="replace")
+            return (r.url, r.read(limit).decode("utf-8", errors="replace"),
+                    r.status)
     except Exception:
-        return url, None
+        return url, None, None
 
 
-def scrape(domain: str, seeds, sub_re, max_pages=40):
-    """Fetch seeds + their same-domain assets; regex subdomain refs."""
+def scrape(domain: str, seeds, max_pages=40):
+    """Fetch seeds + their same-domain assets; extract subdomain refs."""
     found, pages = set(), []
     queue = list(seeds)
     seen = set()
@@ -273,12 +311,11 @@ def scrape(domain: str, seeds, sub_re, max_pages=40):
         if url in seen:
             continue
         seen.add(url)
-        final, body = fetch(url)
+        final, body, _status = fetch(url)
         if body is None:
             continue
         pages.append(url)
-        for m in sub_re.finditer(body):
-            found.add(m.group(1).lower().rstrip("."))
+        found |= extract_subdomains_from_html(body, domain)
         p = RefParser(final, domain)
         try:
             p.feed(body)
@@ -441,12 +478,12 @@ def ct_subdomains(domain: str, timeout=60):
     """
     raw, via = [], "postgres"
     try:
-        raw = _ct_via_postgres(domain)
+        raw = _ct_via_postgres(domain, timeout=timeout)
     except (OSError, socket.timeout) as e:
         print(f"[subdomain] crt.sh postgres failed ({str(e)[:60]}), "
               f"falling back to https JSON")
         via = "http"
-        raw = _ct_via_http(domain)
+        raw = _ct_via_http(domain, timeout=timeout)
 
     names, wildcards = set(), set()
     for blob in raw:
@@ -498,7 +535,7 @@ def probe_http(host: str, timeout=6):
     """One GET on https then http; status + <title> for evidence."""
     for scheme in ("https", "http"):
         url = f"{scheme}://{host}/"
-        final, body = fetch(url, timeout=timeout, limit=65536)
+        final, body, status = fetch(url, timeout=timeout, limit=65536)
         if body is None:
             continue
         title = ""
@@ -513,6 +550,21 @@ def probe_http(host: str, timeout=6):
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
+
+def apex_domain(host: str) -> str:
+    """Registrable apex for enumeration: strip www. and keep the
+    public-suffix-sized tail (foo.co.id style three-part suffixes)."""
+    host = host.strip().lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    parts = host.split(".")
+    if len(parts) >= 3 and parts[-2] in ("co", "ac", "gov", "go", "or",
+                                       "ne", "com", "net", "org"):
+        return ".".join(parts[-3:])
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
 
 def normalize_domain(raw: str) -> str:
     """Accept 'example.com', 'https://example.com/path', trailing dot, etc."""
@@ -542,6 +594,10 @@ def main():
                     "scraping + mutation. No third-party data APIs.")
     ap.add_argument("--domain", required=True,
                     help="Apex domain (or URL) to enumerate")
+    ap.add_argument("--apex", action="store_true",
+                    help="Reduce --domain to its registrable apex first "
+                         "(strips www./sub-labels, keeps foo.co.id style "
+                         "three-part suffixes)")
     ap.add_argument("--wordlist", default=DEFAULT_WORDLIST)
     ap.add_argument("--resolver", help="DNS resolver IP "
                                        "(default: system resolver)")
@@ -565,6 +621,8 @@ def main():
     args = ap.parse_args()
 
     domain = normalize_domain(args.domain)
+    if args.apex:
+        domain = apex_domain(domain)
     resolver = args.resolver or system_resolver()
     found = {}          # host -> {"ips": set, "sources": set}
 
@@ -620,9 +678,7 @@ def main():
         seeds = [f"https://{domain}/", f"http://{domain}/"]
         if resolve(f"www.{domain}"):
             seeds.insert(0, f"https://www.{domain}/")
-        sub_re = re.compile(r"(?i)\b((?:[a-z0-9_-]+\.)+%s)\b"
-                            % re.escape(domain))
-        scraped, pages = scrape(domain, seeds, sub_re, args.max_pages)
+        scraped, pages = scrape(domain, seeds, args.max_pages)
         print(f"[subdomain] scraped {len(pages)} page/asset(s) "
               f"-> {len(scraped)} refs")
         for n in scraped:
@@ -630,8 +686,7 @@ def main():
         # depth 1: scrape root pages of every scraped host
         if args.depth >= 1:
             extra_seeds = [f"https://{h}/" for h in scraped]
-            more, pages2 = scrape(domain, extra_seeds, sub_re,
-                                  args.max_pages)
+            more, pages2 = scrape(domain, extra_seeds, args.max_pages)
             print(f"[subdomain] depth-1 scrape {len(pages2)} page(s) "
                   f"-> {len(more)} refs")
             for n in more:

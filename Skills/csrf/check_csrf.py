@@ -11,6 +11,12 @@ submission six ways and compare against the baseline:
     no_token       token fields removed entirely
     no_session     baseline replayed WITHOUT cookies
 
+Login and registration forms are skipped (kind=login/register in the
+enumerate output) -- forging them has no meaningful impact. GET links
+with action-looking params are recorded but only replayed when
+--replay-get is passed: a replay would fire the real action URL with
+its real parameter values.
+
 Oracle logic:
     CONFIRMED  -- a mutation the server should have rejected succeeded:
                   foreign origin accepted, or forged/missing token accepted
@@ -147,6 +153,10 @@ def main():
     ap.add_argument("--delay", type=float, default=0.2)
     ap.add_argument("--no-submit", action="store_true",
                     help="enumerate/grade structure only; perform no replays")
+    ap.add_argument("--replay-get", action="store_true",
+                    help="also replay action-looking GET links -- these "
+                         "fire the real action URL with real parameter "
+                         "values, so it is opt-in")
     ap.add_argument("--out", help="Output JSON (default: log dir)")
     args = ap.parse_args()
 
@@ -158,6 +168,13 @@ def main():
     print(f"📂 {os.path.basename(src)} — {len(forms)} forms on {url}")
 
     targets = [f for f in forms if f.get("state_changing")]
+    skipped = [f for f in targets
+               if f.get("kind") in ("login", "register")]
+    targets = [f for f in targets
+               if f.get("kind") not in ("login", "register")]
+    if skipped:
+        print(f"  · {len(skipped)} login/register form(s) skipped "
+              f"(no CSRF impact)")
     findings = []
     for f in targets:
         print(f"\n  form {f['method'].upper()} {f['action'][:70]}")
@@ -193,6 +210,40 @@ def main():
             "responses": {k: v[0] for k, v in results.items()},
         })
 
+    # GET links with action-looking params -- SKIPPED unless
+    # --replay-get, because replay fires the real action URL for real.
+    for link in data.get("get_links", []):
+        if not args.replay_get or args.no_submit:
+            findings.append({"action": link, "method": "get",
+                             "grade": "SKIPPED",
+                             "evidence": "action-looking GET link "
+                                         "(--replay-get to test)"})
+            continue
+        f = {"action": link, "method": "get", "inputs": [],
+             "token_fields": []}
+        results = {"baseline": submit(link, "get", {}, args.cookie,
+                                      origin=origin, referer=url)}
+        for name, kw in [
+            ("no_origin", dict(cookie=args.cookie)),
+            ("foreign_origin", dict(cookie=args.cookie,
+                                    origin=EVIL_ORIGIN)),
+            ("no_session", dict(origin=origin, referer=url)),
+        ]:
+            results[name] = submit(link, "get", {}, **kw)
+            time.sleep(args.delay)
+        g, ev = grade(f, results)
+        print(f"    -> {g}: {ev}")
+        findings.append({"action": link, "method": "get",
+                         "token_fields": [], "grade": g, "evidence": ev,
+                         "responses": {k: v[0] for k, v in results.items()}})
+
+    ws = data.get("websockets", [])
+    if ws:
+        print(f"\n  ⚡ {len(ws)} websocket endpoint(s) — CSWSH-safe only "
+              f"if the server validates Origin on the handshake:")
+        for w in ws:
+            print(f"    {w}")
+
     # Browser-level mitigation note from enumerate cookies
     strict = [c["name"] for c in data.get("cookies", [])
               if str(c.get("samesite", "")).lower() == "strict"]
@@ -206,6 +257,7 @@ def main():
     out = args.out or new_log_path("csrf_findings", "json")
     payload = {"generated_by": "check_csrf.py", "source": os.path.basename(src),
                "url": url, "checked_at": datetime.now().isoformat(timespec="seconds"),
+               "websocket_endpoints": ws,
                "confirmed": sum(1 for f in findings
                                 if f["grade"] == "CONFIRMED"),
                "findings": findings}
