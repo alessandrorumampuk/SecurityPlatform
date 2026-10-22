@@ -16,8 +16,30 @@ from log_utils import new_log_path
 
 MARKER_START = "testing1"
 MARKER_END = "testing2"
-SEPARATOR = "x"
+SEPARATOR = "x"          # legacy only — see make_boundaries()
 PLACEHOLDER = "{xss_testing}"
+
+
+def make_boundaries(items):
+    """len(items)+1 indexed boundary tokens: b0 sits right after
+    MARKER_START, b_i between item i-1 and item i, b_last right before
+    MARKER_END — so every item incl. edge ones is cleanly delimited.
+    Each token is 4 random letters + 2-digit index (uniform 6 chars,
+    distinct by construction) and is CHECKED against every item and
+    the markers, so a boundary can never collide with probe content —
+    no item is ever restricted by the separator ('x' is no longer
+    reserved). A filter eating one boundary only merges its two
+    adjacent items; all other items stay individually readable."""
+    vals = [v for _, v in items] + [MARKER_START, MARKER_END]
+    seps = []
+    for i in range(len(items) + 1):
+        while True:
+            b = "".join(secrets.choice(string.ascii_letters)
+                        for _ in range(4)) + f"{i:02d}"
+            if all(b not in v for v in vals):
+                break
+        seps.append(b)
+    return seps
 
 CHARACTERS = [
     ("single_quote", "'"),
@@ -71,8 +93,7 @@ KEYWORDS = [
     ("pair_iframe_onload", "iframe onload"),
     ("close_script", "</script"),
     ("close_title", "</title"),
-    # NOTE: no item may contain 'x' — it is the split separator.
-    # "</textarea" deliberately omitted ("textarea" contains 'x').
+    ("close_textarea", "</textarea"),
     ("close_noscript", "</noscript"),
     ("close_style", "</style"),
     ("close_iframe", "</iframe"),
@@ -87,14 +108,16 @@ KEYWORDS = [
     ("newline", "\n"),
     ("comment_close", "*/"),
     ("interp", "${"),
+    # char-ref spelling variants: filters that sign '&#NNN;' miss
+    # hex/padded/no-semicolon spellings of the same reference
+    ("hex_ref", "&#x65;"),
+    ("nosemi_ref", "&#x65"),
 ]
 
 
 def random_tag_name():
-    """3-letter random tag name for the generic tag-stripper probe.
-    'x'/'X' are excluded — 'x' is the probe split separator."""
-    alpha = [c for c in string.ascii_letters if c.lower() != "x"]
-    return "".join(secrets.choice(alpha) for _ in range(3))
+    """3-letter random tag name for the generic tag-stripper probe."""
+    return "".join(secrets.choice(string.ascii_letters) for _ in range(3))
 
 
 def keyword_items():
@@ -128,6 +151,12 @@ def keyword_items():
         ("gen_jsurl", f"javascript:{i}()"),
         ("gen_break_squote", f"'-{i}()-'"),
         ("gen_break_dquote", f'"-{i}()-"'),
+        # gen_bracket: generic self['x'+'y']() concat-call control —
+        # '[' or ']' filtered kills every bracket-access payload.
+        # gen_u6brace: raw '{...}' ES6 escape survives — a filter can
+        # strip '{' while leaving a bare \ untouched.
+        ("gen_bracket", "self['a'+'b']()"),
+        ("gen_u6brace", "\\u{62}"),
     ]
     ci = next((n for n, (_, v) in enumerate(items) if v.startswith("</")),
               len(items))
@@ -251,7 +280,10 @@ def fetch_rendered(url, timeout_ms=15000):
 
 
 def send_probe(target_url, items, vuln_name, kind, render=False):
-    input_str = MARKER_START + SEPARATOR.join(v for _, v in items) + MARKER_END
+    seps = make_boundaries(items)
+    input_str = (MARKER_START
+                 + "".join(seps[i] + v for i, (_, v) in enumerate(items))
+                 + seps[-1] + MARKER_END)
     print(f"{kind}: {input_str}")
     encoded = urllib.parse.quote(input_str, safe="")
     url = target_url.replace(PLACEHOLDER, encoded)
@@ -277,9 +309,10 @@ def send_probe(target_url, items, vuln_name, kind, render=False):
         f.write(f"<!-- generated_at: {datetime.now().isoformat()} -->\n")
         f.write(f"<!-- probe_mode: {'render' if render else 'curl'} -->\n")
         f.write(f"<!-- input_sent: {input_str} -->\n")
-        f.write(f"<!-- separator: {SEPARATOR} -->\n")
+        f.write(f"<!-- separator: indexed -->\n")
+        f.write(f"<!-- seps_json: {json.dumps(seps)} -->\n")
         f.write(f"<!-- items_json: {json.dumps(items)} -->\n")
-        f.write(f"<!-- {kind.lower()}_names: {SEPARATOR.join(n for n, _ in items)} -->\n")
+        f.write(f"<!-- {kind.lower()}_names: {', '.join(n for n, _ in items)} -->\n")
         f.write(f"<!-- url: {url} -->\n")
         f.write(f"<!-- response_length: {len(response)} -->\n")
         if render:

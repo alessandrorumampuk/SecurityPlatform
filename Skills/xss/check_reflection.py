@@ -103,9 +103,31 @@ def extract_reflected_all(response):
 
 
 def split_by_separator(reflected, expected_count=None):
+    """Legacy extractor for logs written before indexed boundaries
+    existed (single 'x' separator — one colliding item voids the whole
+    reflection)."""
     parts = reflected.split(SEPARATOR)
     if len(parts) != (expected_count or len(CHARACTERS)):
         return None
+    return parts
+
+
+def extract_items(reflected, seps, n):
+    """Indexed-boundary item extraction. seps[i] sits before item i,
+    seps[i+1] right after it (N+1 bounds total, incl. the two edge
+    bounds). Returns a list of N extracted strings; an item is None
+    ('indeterminate') when either of its boundaries is missing or the
+    boundary order collapsed — a filter eating one boundary merges
+    only its two neighbours instead of voiding the whole reflection."""
+    bpos = [reflected.find(b) for b in seps]
+    parts = []
+    for i in range(n):
+        if bpos[i] < 0 or bpos[i + 1] < 0:
+            parts.append(None)
+            continue
+        lo = bpos[i] + len(seps[i])
+        hi = bpos[i + 1]
+        parts.append(reflected[lo:hi] if hi >= lo else None)
     return parts
 
 
@@ -214,9 +236,10 @@ def main():
     print("=" * 80)
     print("Check Reflection")
     print(f"Date: {datetime.now().isoformat()}")
-    print(f"Logic: input 'testing1{SEPARATOR}item1{SEPARATOR}item2...{SEPARATOR}itemN{SEPARATOR}testing2'")
-    print(f"       each item split by '{SEPARATOR}' == expected item -> PASS")
+    print(f"Logic: input 'testing1 b0 item1 b1 item2 ... bN testing2'")
+    print(f"       each item between its indexed boundaries == expected -> PASS")
     print(f"       item != expected -> FAIL (needs bypass)")
+    print(f"       boundary lost -> item INDETERMINATE (merged with neighbour)")
     print(f"Mode: {label}")
     print("=" * 80)
     print()
@@ -248,6 +271,14 @@ def main():
 
     items = items_from_meta(meta, kind)
     print(f"Items: {len(items)} ({'items_json from log' if meta.get('items_json') else 'static list fallback'})")
+
+    seps = None
+    try:
+        seps = json.loads(meta.get("seps_json", "null"))
+    except (ValueError, TypeError):
+        seps = None
+    indexed = bool(seps) and len(seps) == len(items) + 1
+    print(f"Boundaries: {'indexed (' + str(len(seps)) + ')' if indexed else 'legacy x'}")
 
     response_body = strip_html_comments(content)
     dom_hint = bool(_DOM_SRC_RE.search(response_body)
@@ -308,10 +339,13 @@ def main():
         print(f"    Context:    {', '.join(contexts)}")
         print()
 
-        parts = split_by_separator(reflected, len(items))
+        if indexed:
+            parts = extract_items(reflected, seps, len(items))
+        else:
+            parts = split_by_separator(reflected, len(items))
 
         if parts is None:
-            print(f"    [WARNING] Reflected content split by '{SEPARATOR}' gave {len(parts) if parts else 0} parts, expected {len(items)}.")
+            print(f"    [WARNING] Reflected content split by '{SEPARATOR}' gave an unexpected part count.")
             print(f"    Reflected: {reflected}")
             print("    -> Anomaly: filter mangled the separator. Escalate with")
             print("       send_payloads.py --isolate --url \"...\"")
@@ -320,6 +354,28 @@ def main():
 
         for i, (name, expected_char) in enumerate(items):
             got = parts[i]
+
+            if got is None:
+                print(f"    [{i + 1}] {name} ('{expected_char}')")
+                print(f"        Expected:  {expected_char}")
+                print(f"        Got back:  <merged — boundary lost>")
+                print(f"        Verdict:   INDETERMINATE - merged with neighbour item")
+                print()
+                results.append({
+                    "reflection_index": refl_idx,
+                    "position": refl_positions[refl_idx - 1]["start"],
+                    "character_index": i + 1,
+                    "character_name": name,
+                    "character": expected_char,
+                    "expected": expected_char,
+                    "got_back": None,
+                    "passed": None,
+                    "needs_bypass": None,
+                    "verdict": "indeterminate",
+                    "contexts": contexts,
+                })
+                continue
+
             passed = got == expected_char
 
             print(f"    [{i + 1}] {name} ('{expected_char}')")

