@@ -23,16 +23,6 @@ from env_loader import load_env
 from log_utils import new_log_path, generated_by_comment
 load_env()
 
-# Subdomain enumeration/extraction is delegated to the subdomain_finder
-# skill (ct_subdomains = crt.sh certwatch Postgres + HTTP JSON fallback;
-# extract_subdomains_from_html = in-page *.domain reference mining)
-try:
-    from subdomain_finder.find_subdomains import (
-        ct_subdomains, extract_subdomains_from_html)
-except ImportError:
-    ct_subdomains = None
-    extract_subdomains_from_html = None
-
 
 class SocialMediaExtractor(HTMLParser):
     """HTML parser untuk ekstrak social media links dan internal links"""
@@ -368,35 +358,58 @@ class SocialMediaCrawler:
             return False
     
     def _enumerate_subdomains_crtsh(self) -> Set[str]:
-        """Enumerate subdomains using Certificate Transparency (crt.sh).
-
-        Delegated to subdomain_finder.find_subdomains.ct_subdomains, which
-        queries crt.sh's certwatch Postgres index directly and falls back
-        to the HTTP JSON endpoint. Returns plain hostnames plus wildcard
-        zone bases (a '*.x.domain' cert is evidence the zone exists).
-        """
+        """Enumerate subdomains using Certificate Transparency (crt.sh)"""
         print(f"\n🔍 Enumerating subdomains via Certificate Transparency (crt.sh)...")
-
-        if ct_subdomains is None:
-            print(f"   ⚠️  subdomain_finder.find_subdomains is not importable")
-            print(f"   Continuing with regular crawling...")
-            return set()
-
+        subdomains = set()
+        
         try:
-            names, wildcard_zones, _raw_count = ct_subdomains(self.root_domain, timeout=60)
-            subdomains = set(names) | set(wildcard_zones)
-
+            # Query crt.sh API
+            url = f"https://crt.sh/?q=%.{self.root_domain}&output=json"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            }
+            req = urllib.request.Request(url, headers=headers)
+            
+            # Increase timeout to 60 seconds for potentially large responses
+            with urllib.request.urlopen(req, timeout=60) as response:
+                data = json.loads(response.read().decode('utf-8'))
+            
+            # Extract unique subdomains
+            for entry in data:
+                name_value = entry.get('name_value', '')
+                # Split by newlines (crt.sh returns multiple names)
+                for name in name_value.split('\n'):
+                    name = name.strip().lower()
+                    # Skip wildcards and invalid entries
+                    if '*' in name or not name:
+                        continue
+                    # Only keep subdomains of our root domain
+                    if name.endswith(self.root_domain):
+                        subdomains.add(name)
+            
             print(f"   ✅ Found {len(subdomains)} unique subdomains from Certificate Transparency")
-
+            
             # Display subdomains without adding to queue yet
             for subdomain in sorted(subdomains):
                 self.subdomains_found.add(subdomain)
                 # Display without www. prefix for cleaner output
                 display_name = subdomain.replace('www.', '')
                 print(f"      - {display_name}")
-
+            
             return subdomains
-
+            
+        except urllib.error.URLError as e:
+            print(f"   ⚠️  Failed to enumerate subdomains (URLError): {e.reason}")
+            print(f"   Continuing with regular crawling...")
+            return set()
+        except urllib.error.HTTPError as e:
+            print(f"   ⚠️  Failed to enumerate subdomains (HTTPError): {e.code} {e.reason}")
+            print(f"   Continuing with regular crawling...")
+            return set()
+        except json.JSONDecodeError:
+            print(f"   ⚠️  Failed to decode JSON from crt.sh. Response might not be JSON.")
+            print(f"   Continuing with regular crawling...")
+            return set()
         except Exception as e:
             print(f"   ⚠️  Failed to enumerate subdomains: {str(e)}")
             print(f"   Continuing with regular crawling...")
@@ -599,59 +612,7 @@ class SocialMediaCrawler:
                 print(f"\n⚠️  Note: {total_queue} pages were not visited (errors or skipped)")
         
         self._print_results()
-
-    def _extract_subdomain_urls_from_html(self, html: str) -> Set[str]:
-        """Find <label>.<root_domain> references in raw page HTML.
-
-        Extraction itself lives in find_subdomains.extract_subdomains_from_html
-        (single implementation); this only wraps hostnames as https:// URLs
-        and drops already-visited roots.
-        """
-        if extract_subdomains_from_html is None:
-            return set()
-        hosts = extract_subdomains_from_html(html, self.root_domain)
-        return {f"https://{h}" for h in hosts
-                if f"https://{h}" not in self.visited}
-
-    def _queue_discovered_subdomains(self, subdomain_urls: Set[str]):
-        """Track discovered subdomains and push their roots to subdomain_queue."""
-        if not subdomain_urls:
-            return
-
-        print(f"   Found {len(subdomain_urls)} subdomain(s) in content")
-        for subdomain_url in subdomain_urls:
-            subdomain = urllib.parse.urlparse(subdomain_url).netloc.replace('www.', '')
-            self.subdomains_found.add(subdomain)
-            if subdomain_url not in self.visited and subdomain_url not in self.subdomain_queue:
-                self.subdomain_queue.append(subdomain_url)
-
-    def _enqueue_discovered_links(self, links: Set[str]):
-        """Sort same-site links into the crawl queues by domain priority."""
-        base_domain = urllib.parse.urlparse(self.base_url).netloc.replace('www.', '')
-
-        for link in links:
-            # Skip if already in any queue
-            if link in self.to_visit or link in self.subdomain_queue or link in self.regular_pages_main or link in self.regular_pages_subdomain:
-                continue
-
-            link_domain = urllib.parse.urlparse(link).netloc.replace('www.', '')
-
-            if link_domain == base_domain:
-                # Regular page from main domain
-                self.regular_pages_main.append(link)
-            else:
-                # Link is from a subdomain. If the path is root or very
-                # short, treat it as a subdomain home page (high priority)
-                parsed_link = urllib.parse.urlparse(link)
-                path = parsed_link.path.strip('/')
-
-                if not path or path in ['index.html', 'index.php', 'home', '']:
-                    self.subdomains_found.add(link_domain)
-                    self.subdomain_queue.append(link)
-                else:
-                    # Regular page from subdomain - lowest priority
-                    self.regular_pages_subdomain.append(link)
-
+    
     def _crawl_page(self, url: str):
         """Crawl single page"""
         try:
@@ -759,15 +720,86 @@ class SocialMediaCrawler:
             if not found_any:
                 print(f"   No social media links found (continuing to next page...)")
             
-            # Extract subdomains from HTML content and queue their roots
-            subdomain_urls = self._extract_subdomain_urls_from_html(html)
-            self._queue_discovered_subdomains(subdomain_urls)
-
+            # Extract subdomains from HTML content (for pages listing subdomains)
+            # First, decode common HTML entities to avoid issues like u003e
+            import html as html_module
+            decoded_html = html_module.unescape(html)
+            
+            subdomain_pattern = rf'(?<![a-z0-9\-])([a-z0-9\-]+\.{re.escape(self.root_domain)})(?![a-z0-9\-])'
+            subdomain_matches = re.findall(subdomain_pattern, decoded_html, re.IGNORECASE)
+            
+            subdomain_urls = set()
+            for subdomain in subdomain_matches:
+                # Skip if it's the root domain itself
+                if subdomain.lower() == self.root_domain.lower():
+                    continue
+                
+                # Remove Unicode escape sequences and invalid prefixes (e.g., u003e, x003e)
+                # These come from JavaScript strings in HTML
+                subdomain = re.sub(r'^[ux]\d{3,4}e', '', subdomain, flags=re.IGNORECASE)
+                subdomain = re.sub(r'^[^a-z0-9]+', '', subdomain, flags=re.IGNORECASE)
+                
+                # Skip if nothing left after cleaning
+                if not subdomain or subdomain.lower() == self.root_domain.lower():
+                    continue
+                
+                # Validate subdomain format (no special characters except hyphen and dot)
+                if not re.match(r'^[a-z0-9\-]+\.[a-z0-9\-\.]+$', subdomain, re.IGNORECASE):
+                    continue
+                
+                # Create full URL with https
+                subdomain_url = f"https://{subdomain}"
+                
+                # Check if not already visited
+                if subdomain_url not in self.visited:
+                    subdomain_urls.add(subdomain_url)
+            
+            # Add subdomains to priority queue
+            if subdomain_urls:
+                print(f"   Found {len(subdomain_urls)} subdomain(s) in content")
+                for subdomain_url in subdomain_urls:
+                    # Extract subdomain for tracking
+                    subdomain = urllib.parse.urlparse(subdomain_url).netloc.replace('www.', '')
+                    if subdomain not in self.subdomains_found:
+                        self.subdomains_found.add(subdomain)
+                    
+                    # Add to subdomain queue (high priority)
+                    if subdomain_url not in self.visited and subdomain_url not in self.subdomain_queue:
+                        self.subdomain_queue.append(subdomain_url)
+            
             # Add new links to appropriate queue based on domain
             new_links = parser.links - self.visited
             if new_links:
                 print(f"   Added {len(new_links)} new page(s) to queue")
-            self._enqueue_discovered_links(new_links)
+            
+            for link in new_links:
+                # Skip if already in any queue
+                if link in self.to_visit or link in self.subdomain_queue or link in self.regular_pages_main or link in self.regular_pages_subdomain:
+                    continue
+                
+                # Determine if link is from main domain or subdomain
+                link_domain = urllib.parse.urlparse(link).netloc.replace('www.', '')
+                base_domain = urllib.parse.urlparse(self.base_url).netloc.replace('www.', '')
+                
+                if link_domain == base_domain:
+                    # Regular page from main domain
+                    self.regular_pages_main.append(link)
+                else:
+                    # Link is from a subdomain
+                    # Check if this is a new subdomain (domain-level page, not a regular page)
+                    # If the path is root or very short, treat it as subdomain priority
+                    parsed_link = urllib.parse.urlparse(link)
+                    path = parsed_link.path.strip('/')
+                    
+                    # If it's a root page or looks like a subdomain home page, prioritize it
+                    if not path or path in ['index.html', 'index.php', 'home', '']:
+                        # This is likely a subdomain home page - high priority
+                        if link_domain not in self.subdomains_found:
+                            self.subdomains_found.add(link_domain)
+                        self.subdomain_queue.append(link)
+                    else:
+                        # Regular page from subdomain - lowest priority
+                        self.regular_pages_subdomain.append(link)
             
         except urllib.error.HTTPError as e:
             # Handle redirects manually (307, 301, 302, etc)
@@ -827,15 +859,46 @@ class SocialMediaCrawler:
                             if not found_any:
                                 print(f"   No social media links found (continuing to next page...)")
                             
-                            # Extract subdomains and queue new links
-                            subdomain_urls = self._extract_subdomain_urls_from_html(html)
-                            self._queue_discovered_subdomains(subdomain_urls)
-
+                            # Extract subdomains from HTML content
+                            import html as html_module
+                            decoded_html = html_module.unescape(html)
+                            
+                            subdomain_pattern = rf'(?<![a-z0-9\-])([a-z0-9\-]+\.{re.escape(self.root_domain)})(?![a-z0-9\-])'
+                            subdomain_matches = re.findall(subdomain_pattern, decoded_html, re.IGNORECASE)
+                            
+                            subdomain_urls = set()
+                            for subdomain in subdomain_matches:
+                                if subdomain.lower() == self.root_domain.lower():
+                                    continue
+                                
+                                subdomain = re.sub(r'^[ux]\d{3,4}e', '', subdomain, flags=re.IGNORECASE)
+                                subdomain = re.sub(r'^[^a-z0-9]+', '', subdomain, flags=re.IGNORECASE)
+                                
+                                if not subdomain or subdomain.lower() == self.root_domain.lower():
+                                    continue
+                                
+                                if not re.match(r'^[a-z0-9\-]+\.[a-z0-9\-\.]+$', subdomain, re.IGNORECASE):
+                                    continue
+                                
+                                subdomain_url = f"https://{subdomain}"
+                                
+                                if subdomain_url not in self.visited:
+                                    subdomain_urls.add(subdomain_url)
+                            
+                            if subdomain_urls:
+                                print(f"   Found {len(subdomain_urls)} subdomain(s) in content")
+                                for subdomain_url in subdomain_urls:
+                                    if subdomain_url not in self.to_visit:
+                                        self.to_visit.append(subdomain_url)
+                            
+                            # Add new links to queue
                             new_links = parser.links - self.visited
                             if new_links:
                                 print(f"   Added {len(new_links)} new page(s) to queue")
-                            self._enqueue_discovered_links(new_links)
-
+                            for link in new_links:
+                                if link not in self.to_visit:
+                                    self.to_visit.append(link)
+                            
                             return  # Successfully processed
                     except Exception as parse_error:
                         print(f"   ⚠️  Failed to parse HTML from {e.code} response: {parse_error}")
