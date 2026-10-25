@@ -1,0 +1,9 @@
+# SecurityPlatform runtime dependencies
+# Everything else uses the Python standard library.
+
+flask>=3.0,<4          # web.py UI + status endpoints
+requests>=2.31,<3      # info_disclosure / dirlist probing
+playwright>=1.40,<2    # vvm.py graph renderer + xss render verification
+Pillow>=10.0,<12       # vvm.py annotated screenshot/graph image
+
+# After installing: playwright install chromium

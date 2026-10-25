@@ -164,16 +164,78 @@ def keyword_items():
     return items
 
 
-def send_curl(url):
+def send_curl_meta(url):
+    """(body, http_status) — status appended via -w, split off the last
+    line; '000' when the request never produced one."""
     try:
         result = subprocess.run(
-            ["curl", "-s", "-k", "--max-time", "10", url],
+            ["curl", "-s", "-k", "--max-time", "10",
+             "-w", "\n%{http_code}", url],
             capture_output=True,
             text=True,
         )
-        return result.stdout
+        body, sep, code = result.stdout.rpartition("\n")
+        if not sep:
+            return result.stdout, "000"
+        return body, code.strip() or "000"
     except Exception as e:
-        return f"[CURL_ERROR] {e}"
+        return f"[CURL_ERROR] {e}", "000"
+
+
+def send_curl(url):
+    return send_curl_meta(url)[0]
+
+
+def _probe_string(items):
+    """testing1{sep0}{item0}{sep1}...{sepN}testing2 — same indexed-
+    boundary format send_probe uses."""
+    seps = make_boundaries(items)
+    return (MARKER_START
+            + "".join(seps[i] + v for i, (_, v) in enumerate(items))
+            + seps[-1] + MARKER_END), seps
+
+
+def _extract_indexed(seg, seps, n):
+    """seg = text between the markers; seps[i] bounds item i on the left,
+    seps[i+1] on the right. A lost boundary -> None (merged item)."""
+    bpos = [seg.find(b) for b in seps]
+    return [seg[bpos[i] + len(seps[i]):bpos[i + 1]]
+            if 0 <= bpos[i] <= bpos[i + 1] != -1 else None
+            for i in range(n)]
+
+
+def _bisect(target_url, items, out, budget):
+    """Request-level block attribution: a deny page carries no markers,
+    so recursively halve the item set — a sub-probe that reflects proves
+    its items survive; one that still blocks narrows the offender."""
+    if not items:
+        return
+    if budget[0] <= 0:
+        out += [{"name": n, "expected": v, "got": None,
+                 "verdict": "unresolved"} for n, v in items]
+        return
+    s, seps = _probe_string(items)
+    url = target_url.replace(PLACEHOLDER,
+                             urllib.parse.quote(s, safe=""))
+    body, status = send_curl_meta(url)
+    budget[0] -= 1
+    m = re.search(re.escape(MARKER_START) + r"(.*?)" +
+                  re.escape(MARKER_END), body, re.DOTALL)
+    if m:
+        parts = _extract_indexed(m.group(1), seps, len(items))
+        for (n, v), got in zip(items, parts):
+            out.append({"name": n, "expected": v, "got": got,
+                        "verdict": "passed" if got == v
+                                   else "indeterminate" if got is None
+                                   else "transformed"})
+        return
+    if len(items) == 1:
+        out.append({"name": items[0][0], "expected": items[0][1],
+                    "got": None, "verdict": "blocked", "status": status})
+        return
+    mid = len(items) // 2
+    _bisect(target_url, items[:mid], out, budget)
+    _bisect(target_url, items[mid:], out, budget)
 
 
 # Injected before any page script runs (add_init_script): record which DOM
@@ -300,8 +362,8 @@ def send_probe(target_url, items, vuln_name, kind, render=False):
               f"sinks: {sorted({n for n, _ in rmeta['sinks']}) or 'none'} | "
               f"fired: {rmeta['fired'] or 'none'}")
     else:
-        response = send_curl(url)
-        print(f"Response length: {len(response)}")
+        response, http_status = send_curl_meta(url)
+        print(f"Response length: {len(response)} (HTTP {http_status})")
 
     html_file = new_log_path(vuln_name, "html")
     with open(html_file, "w") as f:
@@ -322,6 +384,93 @@ def send_probe(target_url, items, vuln_name, kind, render=False):
             f.write(f"<!-- fired_json: {json.dumps(rmeta['fired'])} -->\n")
         f.write(response)
     print(f"Saved: {html_file}\n")
+
+    if not render and MARKER_START not in response:
+        # Request-level block: a deny page carries no markers, so this
+        # response alone can't say WHICH item caused it. Baseline first —
+        # a bare marker that reflects proves the surface is alive and an
+        # item triggered the block; then bisect to attribute it.
+        print("[ANOMALY] No markers in response — possible request-level "
+              "block (deny page). Checking baseline reflection…")
+        base = MARKER_START + secrets.token_hex(4) + MARKER_END
+        burl = target_url.replace(PLACEHOLDER,
+                                  urllib.parse.quote(base, safe=""))
+        bbody, bstatus = send_curl_meta(burl)
+        attrib = {"generated_by": "send_payloads.py",
+                  "generated_at": datetime.now().isoformat(),
+                  "url": target_url, "kind": kind,
+                  "http_status": http_status,
+                  "baseline_status": bstatus,
+                  "baseline_reflects": MARKER_START in bbody,
+                  "baseline_marker": base,
+                  "baseline_body": bbody}
+        if attrib["baseline_reflects"]:
+            print("          baseline reflects -> bisecting items to "
+                  "attribute the block…")
+            verdicts, budget = [], [len(items) + 16]
+            _bisect(target_url, items, verdicts, budget)
+            blocked = [v["name"] for v in verdicts
+                       if v["verdict"] == "blocked"]
+            attrib["verdicts"] = verdicts
+            print(f"          blocked: {blocked or 'none'} "
+                  f"({len(items) + 16 - budget[0]} probe requests)")
+        else:
+            attrib["verdicts"] = []
+            print("          baseline does NOT reflect -> dead surface / "
+                  "blanket block; per-item attribution impossible")
+        apath = html_file.replace(".html", "_attribution.json")
+        with open(apath, "w") as f:
+            json.dump(attrib, f, indent=2, ensure_ascii=False)
+        print(f"Saved: {apath}\n")
+
+
+def _reflects_verbatim(target_url, frag):
+    """One-request shape pre-probe: is `frag` reflected verbatim EVERYWHERE
+    the markers bound it? Same conservative rule as the keyword mask —
+    transformed in ANY reflection = dead. A raw unfiltered echo elsewhere
+    must not hide a context encoding it (e.g. '()' -> '&#40;&#41;')."""
+    probe = MARKER_START + frag + MARKER_END
+    url = target_url.replace(PLACEHOLDER,
+                             urllib.parse.quote(probe, safe=""))
+    segs = re.findall(re.escape(MARKER_START) + r"(.{0,200}?)" +
+                      re.escape(MARKER_END), send_curl(url), re.DOTALL)
+    return bool(segs) and all(s == frag for s in segs)
+
+
+def parens_ok(target_url):
+    return _reflects_verbatim(target_url, "(1)")
+
+
+def tick_ok(target_url):
+    return _reflects_verbatim(target_url, "`1`")
+
+
+def _tick_call_variants(items):
+    """Swap () -> `1` inside gen_* shape probes when parens are dead.
+    gen_call is NOT converted (it is the parens control itself), and the
+    call_* junctions stay untouched — they honestly report the name(1)
+    signature. Shape probes must survive so gen_bracket/gen_script/etc.
+    still test their feature with the live `1` call form."""
+    out = []
+    for name, value in items:
+        if name.startswith("gen_") and name != "gen_call" and "(" in value:
+            value = value.replace("(1)", "`1`").replace("()", "`1`")
+        out.append((name, value))
+    return out
+
+
+def _bare_call_variants(items):
+    """Last resort when BOTH call syntaxes are dead: strip the call from
+    gen_* shape probes entirely so they still test their FEATURE (bracket
+    access, script tag, handler) — the call-shape question is answered by
+    the gen_call/gen_tick controls and the builders' onerror=;throw path."""
+    out = []
+    for name, value in items:
+        if name.startswith("gen_") and name not in ("gen_call", "gen_tick"):
+            for dead in ("(1)", "()", "`1`"):
+                value = value.replace(dead, "")
+        out.append((name, value))
+    return out
 
 
 def isolate_probe(target_url):
@@ -394,6 +543,15 @@ def main():
         return
 
     kw_items = keyword_items() if args.probe2 else []
+    if kw_items and not parens_ok(target_url):
+        if tick_ok(target_url):
+            print("[*] parens encoded/removed -> gen_* probes use `1` "
+                  "call form")
+            kw_items = _tick_call_variants(kw_items)
+        else:
+            print("[*] parens AND backtick dead -> gen_* shape probes "
+                  "drop the call (feature-only)")
+            kw_items = _bare_call_variants(kw_items)
 
     print("=" * 80)
     print("Send Payloads")

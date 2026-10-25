@@ -660,56 +660,39 @@ _BLH_CHECKERS = {"instagram.com": "instagram", "tiktok.com": "tiktok",
                  "facebook.com": "facebook", "fb.com": "facebook"}
 
 
-def hunt_blh(graph):
-    """For every social-link edge whose platform has a checker, run the
-    skill's checker script; its verdict alone decides BLH. Links on
-    platforms without a checker are out of scope (no oracle -> no claim).
-    """
-    byid = {n["id"]: n for n in graph["nodes"]}
+def hunt_blh(graph, page_url, stem):
+    """Mine social links on the ONE target page via the
+    social_media_crawler skill (single page: --max-pages 1, no crt.sh
+    enumeration, no subdomain crawl). Findings are the discovered links
+    themselves — no platform checkers are run."""
+    crawl_j = stem + "-blh-social.json"
+    print("  [blh] mining social links on the target page...")
+    _skill_run(BLH_DIR / "social_media_crawler.py",
+               "--url", page_url, "--max-pages", "1",
+               "--no-subdomains", "--no-enumerate",
+               "--output", crawl_j, timeout=300)
+    data = _read_json(crawl_j) or {}
+
+    # href -> graph edge so findings still annotate the page
+    edge_by_href = {e.get("href", ""): e for e in graph["edges"]
+                    if e["type"] == "points_to" and e.get("href")}
+
     finds = []
     done = set()
-    for e in graph["edges"]:
-        if e["type"] != "points_to":
-            continue
-        dom = byid.get(e["dst"], {})
-        host = (dom.get("host") or "").lower().lstrip("www.")
-        platform = next((v for k, v in _BLH_CHECKERS.items()
-                         if host == k or host.endswith("." + k)), None)
-        href = e.get("href", "")
-        if not platform or href in done:
-            continue
-        done.add(href)
-        print(f"  [blh:{platform}] profile check {href}")
-        script = BLH_DIR / f"open_{platform}_playwright.py"
-        out, t0, rc = _skill_run(script, href, timeout=300)
-        rep = _log_since(f"broken_link_hijacking_{platform}_verify", t0)
-        res = (rep or {}).get("results", [{}])[0]
-        evi = e.get("href", "")
-        if not res:
+    for platform, entries in (data.get("social_media") or {}).items():
+        for e in entries:
+            href = e.get("url", "") if isinstance(e, dict) else str(e)
+            if not href or href in done:
+                continue
+            done.add(href)
+            e0 = edge_by_href.get(href)
             finds.append(dict(
                 vuln="Broken Link Hijacking",
                 status="candidate",
-                path=[e["src"], e["dst"]], tool="broken_link_hijacking",
-                evidence=(f"{evi} -- checker unavailable "
-                          f"(rc={rc}; login may be required)")))
-        elif res.get("exists") is False and _evaluated(res):
-            finds.append(dict(
-                vuln="Broken Link Hijacking",
-                status="verified",
-                path=[e["src"], e["dst"]], tool="broken_link_hijacking",
-                evidence=(f"{evi} -- platform checker evaluated page: "
-                          f"profile not found (status={res.get('status')})")))
-        elif res.get("exists") is True:
-            # profile actually exists -> earlier dead verdict was a
-            # transport-level false positive; drop the finding entirely
-            continue
-        else:
-            finds.append(dict(
-                vuln="Broken Link Hijacking",
-                status="candidate",
-                path=[e["src"], e["dst"]], tool="broken_link_hijacking",
-                evidence=(f"{evi} -- checker status "
-                          f"{res.get('status')}; needs manual review")))
+                path=[e0["src"], e0["dst"]] if e0
+                     else ["page:" + page_url],
+                tool="broken_link_hijacking",
+                evidence=f"{href} -- {platform} link found on page"))
     return finds
 
 
@@ -777,7 +760,7 @@ def hunt_skills(graph, data, page_url, stem, max_xss, cookie="",
     if "csrf" in only:
         finds += hunt_csrf(graph, page_url, stem, cookie)
     if "blh" in only:
-        finds += hunt_blh(graph)
+        finds += hunt_blh(graph, page_url, stem)
     return finds
 
 

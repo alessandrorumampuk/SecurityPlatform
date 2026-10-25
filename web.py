@@ -103,6 +103,22 @@ PAGE = """<!doctype html>
   .live{color:#d29922;font-style:italic;font-weight:400}
   .empty{color:#3fb950;font-size:.9rem}
   .meta{color:#6e7681;font-size:.75rem;margin-top:10px}
+  .step{margin:10px 0 2px;font-size:.85rem}
+  .step .num{color:#58a6ff;font-weight:700}
+  .step .t{color:#8b949e;font-weight:600}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.78rem;
+        color:#c9d1d9;word-break:break-all;padding:2px 0 2px 18px}
+  .mono.dim{color:#6e7681}
+  .mono.ok{color:#3fb950}
+  .mono.bad{color:#d29922}
+  .mono .en{color:#8b949e;font-style:italic}
+  .showbtn{background:#21262d;color:#8b949e;border:1px solid #30363d;
+    border-radius:6px;font-size:.68rem;padding:1px 8px;margin-left:8px;
+    cursor:pointer;vertical-align:middle}
+  .showbtn:hover{color:#c9d1d9;border-color:#8b949e}
+  .mono .showbtn{font-size:.62rem;padding:0 6px;margin-left:10px;
+    vertical-align:baseline}
+  .raw{color:#79c0ff}
 </style></head><body>
 <div class="wrap hero">
   <h1>Security<span class="v">Platform</span></h1>
@@ -129,7 +145,7 @@ PAGE = """<!doctype html>
     <label><input type="checkbox" value="info_disclosure"> Information Disclosure</label>
     <label><input type="checkbox" value="dirlist"> Directory Listing</label>
     <p class="hint">Unchecking All lets you pick detectors individually.
-      BLH runs a real browser per profile — it is the slowest.</p>
+      BLH only mines social links — no profile verification.</p>
   </div>
   <div id="status"></div>
 </div>
@@ -137,6 +153,7 @@ PAGE = """<!doctype html>
   <div class="card"><b>Annotated screenshot</b><br>
     <img id="shot" alt="VVM screenshot"></div>
   <div class="card" id="findings"></div>
+  <div class="card" id="xss_steps"></div>
   <div class="meta" id="meta"></div>
 </div>
 <script>
@@ -146,6 +163,16 @@ const esc=s=>String(s).replace(/[&<>"']/g,
 // recommend_payload.py — inert evidence anchor, not part of the exploit.
 // Highlight it so it reads as an artifact (strip it when reusing payloads).
 const hl=s=>esc(s).replace(/vvm[a-z]{6}|vvm{id}/g,'<span class="vvm">$&</span>');
+// one delegated toggle for every .showbtn — 'Show the Process' targets an
+// element by id (data-t); per-item Show flips its next sibling .raw span
+document.addEventListener('click',e=>{
+  const b=e.target.closest('.showbtn');if(!b)return;
+  const r=b.dataset.t?document.getElementById(b.dataset.t):b.nextElementSibling;
+  if(!r)return;
+  const on=r.style.display==='none';
+  r.style.display=on?'':'none';
+  b.textContent=on?(b.dataset.on||'Hide'):(b.dataset.off||'Show');
+});
 const tg=document.getElementById('tg'),st=document.getElementById('st'),
       all=document.getElementById('ck_all');
 tg.onclick=()=>{st.classList.toggle('open');tg.classList.toggle('open')};
@@ -163,7 +190,7 @@ function refreshMode(){
   const a=modeVal()==='automation';
   maxw.style.display=a?'flex':'none';
   modehint.textContent=a
-    ?'Automation: subdomain_finder enumerates *.domain into one JSON log, then every checked detector scans each resolving subdomain (3 hosts in parallel).'
+    ?'Automation: subdomain_finder enumerates *.domain, then every checked detector scans each resolving host (3 parallel). BLH-only uses its own crawler enumeration.'
     :'Single Shot: VVM maps the one target page, then runs the checked detectors on it.';
 }
 radios.forEach(r=>r.onchange=refreshMode);refreshMode();
@@ -189,8 +216,14 @@ function renderResults(j,live){
   shotCard.style.display=j.image?'block':'none';
   if(j.image)document.getElementById('shot').src='/out/'+j.image+'?t='+Date.now();
   const F=document.getElementById('findings');
+  const X=document.getElementById('xss_steps');
   const finds=j.findings||[];
+  const tr=j.xss_trace||[];
+  // trace card defaults to hidden; preserve the user's toggle across the
+  // 2s re-renders (button label is rebuilt each time, so read current state)
+  const procOpen=X.dataset.init&&X.style.display!=='none';
   let h='<b>Findings</b>'+(live?' <span class="live">· live — scan still running</span>':'');
+  if(tr.length)h+=`<button class="showbtn" data-t="xss_steps" data-off="Show the Process" data-on="Hide the Process">${procOpen?'Hide':'Show'} the Process</button>`;
   if(j.targets&&j.targets.length){
     h+='<div class="tlist">'+j.targets.map(t=>
       `<div class="${t.status==='done'?'ok':t.status==='error'?'err':'run'}">`+
@@ -204,6 +237,32 @@ function renderResults(j,live){
       <span class="tool">[${esc(f.tool||'surface')}${f.host?' @ '+esc(f.host):''}]</span>
       <div class="ev">${hl(f.evidence||'')}</div></div>`;});
   F.innerHTML=h;
+  if(tr.length){
+    let xh='<b>XSS bypass trace</b><div class="hint" style="margin:0 0 4px">how the pipeline probed the filter and picked the payload</div>';
+    tr.forEach((s,i)=>{
+      xh+=`<div class="step"><span class="num">${i+1}.</span> <span class="t">${esc(s.t)}</span>`;
+      if(s.d)xh+=`<div class="mono">${hl(s.d)}</div>`;
+      (s.items||[]).forEach(it=>{
+        const cls=it.ok===false?'bad':it.ok===true?'ok':'dim';
+        const extra=it.g!==undefined&&it.g!==it.e
+          ?` <span class="en">→ ${hl(String(it.g))}</span>`:'';
+        const tech=it.e&&it.g===undefined?` <span class="en">${esc(it.e)}</span>`:'';
+        // raw injected text — char verdicts carry it in e; keyword mask
+        // items carry it in raw (items_json map built server-side)
+        const raw=it.raw!==undefined?it.raw:(it.g!==undefined?it.e:undefined);
+        const rb=raw!==undefined&&raw!==''
+          ?`<button class="showbtn">Show</button><span class="raw" style="display:none"> ${hl(String(raw))}</span>`:'';
+        xh+=`<div class="mono ${cls}">${esc(String(it.n??''))}${extra}${tech}${rb}</div>`;
+      });
+      (s.verify||[]).forEach(v=>{
+        xh+=`<div class="mono ${v.g==='V'?'ok':'bad'}">[${esc(v.g)}] ${hl(v.p||'')}`+
+            (v.e?` <span class="en">— ${esc(v.e)}</span>`:'')+'</div>';
+      });
+      xh+='</div>';
+    });
+    X.innerHTML=xh;
+    if(!X.dataset.init){X.style.display='none';X.dataset.init='1';}
+  }else{X.style.display='none';}
   document.getElementById('meta').textContent= j.targets&&j.targets.length
     ?`${j.nodes!=null?j.nodes:j.targets.length} hosts scanned · ${j.elements||0} subdomains discovered${j.elapsed!=null?' · '+j.elapsed+'s':''}`
     :`${j.elements||0} elements mapped · ${j.nodes||0} nodes / ${j.edges||0} edges${j.elapsed!=null?' · '+j.elapsed+'s':''}`;
@@ -232,6 +291,105 @@ _STAGE_LABEL = {"xss": "XSS", "csrf": "CSRF", "blh": "Broken Link Hijacking",
                 "info_disclosure": "Information Disclosure",
                 "dirlist": "Directory Listing",
                 "auto": "Automation", "subdomain": "Subdomain Finder"}
+
+
+XSS_LOG = BASE / "log"
+
+
+def _xss_trace(t0):
+    """Rebuild the bypass narrative from artifacts the xss pipeline left
+    in log/ since the job started: probe strings, char/keyword verdicts,
+    generated candidates, per-payload V/R grades. Read-only — the skill
+    scripts are untouched."""
+    steps = []
+    try:
+        def newest(suffix):
+            c = [p for p in XSS_LOG.glob(f"*{suffix}")
+                 if p.stat().st_mtime >= t0]
+            return max(c, key=lambda p: p.stat().st_mtime) if c else None
+
+        def html_meta(path):
+            meta = {}
+            # the 'newline' probe item puts a literal \n inside input_sent,
+            # so that one comment can span two physical lines — match the
+            # opening tag and grab the value up to '-->' or end of line.
+            for line in path.read_text(
+                    encoding="utf-8", errors="replace").splitlines()[:25]:
+                m = re.match(r"<!-- (\w+):\s*(.*)$", line)
+                if m:
+                    meta[m.group(1)] = re.sub(r"\s*-->\s*$", "",
+                                              m.group(2))
+            return meta
+
+        def mask_from(analysis):
+            mask = {}
+            for r in analysis.get("results", []):
+                n = r.get("character_name")
+                if not n:
+                    continue
+                mask[n] = mask.get(n, True) and bool(r.get("passed"))
+            return mask
+
+        # 1-2. char probe + per-char verdicts
+        hp, ra = newest("xss.html"), newest("xss_reflection_analysis.json")
+        if hp:
+            steps.append({"t": "Char probe — marker-bounded items sent",
+                          "d": html_meta(hp).get("input_sent", "")})
+        if ra:
+            d = json.loads(ra.read_text(encoding="utf-8", errors="replace"))
+            items = [
+                {"n": r.get("character_name"), "e": r.get("expected"),
+                 "g": r.get("got_back"), "ok": bool(r.get("passed"))}
+                for r in d.get("results", [])
+                if r.get("reflection_index") == 1]
+            steps.append({"t": "Char verdicts — what the filter did",
+                          "items": items})
+        # 3-4. keyword probe + mask
+        kp, ka = newest("xss_keywords.html"), \
+            newest("xss_keyword_analysis.json")
+        items_map = {}
+        if kp:
+            km = html_meta(kp)
+            steps.append({"t": "Keyword probe — junction/shape items sent",
+                          "d": km.get("input_sent", "")})
+            try:
+                items_map = {n: t for n, t in json.loads(
+                    km.get("items_json") or "[]")}
+            except Exception:
+                pass
+        if ka:
+            d = json.loads(ka.read_text(encoding="utf-8", errors="replace"))
+            mask = mask_from(d)
+            got = {}
+            for r in d.get("results", []):
+                n = r.get("character_name")
+                if n and r.get("got_back") is not None \
+                        and r.get("got_back") != r.get("expected"):
+                    got.setdefault(n, r["got_back"])
+            steps.append({"t": "Keyword mask — signature survivors",
+                          "items": [{"n": k, "ok": v,
+                                     "raw": items_map.get(k),
+                                     "g": got.get(k)}
+                                    for k, v in mask.items()]})
+        # 5-6. candidates + per-payload verification
+        rec = newest("xss_recommendation.json")
+        if rec:
+            d = json.loads(rec.read_text(encoding="utf-8", errors="replace"))
+            for refl in d.get("reflections", []):
+                ctx = refl.get("context", "?")
+                steps.append({"t": f"Candidates — grammar output (ctx={ctx})",
+                              "items": [{"n": c.get("payload"),
+                                         "e": c.get("technique")}
+                                        for c in refl.get("candidates", [])]})
+                ver = [{"g": v.get("confidence"), "p": v.get("payload"),
+                        "e": v.get("evidence")}
+                       for v in (refl.get("verification") or [])]
+                if ver:
+                    steps.append({"t": f"Verify — marker-in-DOM (ctx={ctx})",
+                                  "verify": ver})
+    except Exception:
+        pass
+    return steps
 
 
 def _stage_from(line):
@@ -303,6 +461,7 @@ def _run_job(job, url, skills, mode="single", max_subs=0):
     finds.sort(key=lambda f: f.get("status") != "verified")
     JOBS[job].update(
         status="done", image=png.name,
+        xss_trace=_xss_trace(t0),
         findings=[{"vuln": f.get("vuln"), "status": f.get("status"),
                    "evidence": f.get("evidence"), "tool": f.get("tool")}
                   for f in finds],
@@ -372,6 +531,7 @@ def _run_automation(job, url, skills, max_subs):
     finds.sort(key=lambda f: f.get("status") != "verified")
     JOBS[job].update(
         status="done", image=None,
+        xss_trace=_xss_trace(t0),
         targets=data.get("targets", []),
         findings=[{"vuln": f.get("vuln"), "status": f.get("status"),
                    "evidence": f.get("evidence"), "tool": f.get("tool"),
@@ -433,6 +593,11 @@ def status(job):
                 out["elements"] = live["subdomains_discovered"]
         except Exception:
             pass
+        # show the bypass trace while the pipeline is still writing
+        # artifacts — each stage appears as soon as its log lands
+        tr = _xss_trace(j.get("started", 0))
+        if tr:
+            out["xss_trace"] = tr
     return jsonify(out)
 
 

@@ -303,17 +303,68 @@ def main():
             sink_names.append(sname)
             sink_args.append(sarg)
 
+    results = []
+    attribution_quote = None
+
     if not reflected_matches:
         print("[NOT FOUND] No reflection detected in response.")
-        print("         Ambiguous: no reflection surface, filter/WAF rejected")
-        print("         the request, or reflection is client-side only (DOM).")
-        print("         -> Escalate: send_payloads.py --render --url \"...\" (DOM sinks)")
-        print("            then send_payloads.py --isolate --url \"...\" (per-char)")
-        return
+        # Request-level block? A deny page gives no per-item evidence —
+        # but send_payloads bisects the item set on that anomaly and
+        # writes <stem>_attribution.json with real per-item verdicts.
+        verdicts, adata = [], {}
+        attrib = html_file.replace(".html", "_attribution.json") \
+            if isinstance(html_file, str) else None
+        if attrib and os.path.exists(attrib):
+            try:
+                adata = json.load(open(attrib))
+                verdicts = adata.get("verdicts") or []
+            except Exception:
+                verdicts = []
+        if not verdicts:
+            print("         Ambiguous: no reflection surface, filter/WAF "
+                  "rejected the request, or reflection is client-side "
+                  "only (DOM).")
+            print("         -> Escalate: send_payloads.py --render --url "
+                  "\"...\" (DOM sinks)")
+            print("            then send_payloads.py --isolate --url "
+                  "\"...\" (per-char)")
+            return
+        print("         Request-level block confirmed (baseline reflects")
+        print("         but the combined probe was denied). Bisect results:")
+        # the baseline marker DID reflect — its position reveals the
+        # injection context the deny page erased (attr/JS/html + quote)
+        bctx = ["request-level block (bisected)"]
+        bbody, bmark = adata.get("baseline_body"), adata.get("baseline_marker")
+        if bbody and bmark:
+            bctx = detect_reflection_context(bbody, bmark) or bctx
+            print(f"         Surface context (from baseline): {bctx}")
+            for q in ('"', "'", "`"):
+                if re.search(r"[=(\s]" + re.escape(q) +
+                             r"[^" + re.escape(q) + r"]*" +
+                             re.escape(bmark), bbody):
+                    attribution_quote = q
+                    break
+        for i, v in enumerate(verdicts, 1):
+            verd = v.get("verdict")
+            results.append({
+                "reflection_index": 0,
+                "position": -1,
+                "character_index": i,
+                "character_name": v.get("name"),
+                "character": v.get("expected"),
+                "expected": v.get("expected"),
+                "got_back": (v.get("got") if verd != "blocked"
+                             else f"request blocked — HTTP "
+                                  f"{v.get('status', '?')}"),
+                "passed": (True if verd == "passed"
+                           else None if verd in ("indeterminate",
+                                                 "unresolved")
+                           else False),
+                "needs_bypass": verd != "passed",
+                "contexts": bctx,
+            })
 
     expected_chars = [v for _, v in items]
-
-    results = []
 
     for refl_idx, reflected in enumerate(reflected_matches, start=1):
         sink_name = sink_names[refl_idx - 1]
@@ -408,7 +459,7 @@ def main():
     print(f"{'#':<4} {'Character':<20} {'Expected':<12} {'Got back':<20} {'Bypass':<8}")
     print("-" * 68)
     for r in results:
-        print(f"{r['character_index']:<4} {r['character_name']:<20} {r['expected']:<12} {r['got_back']:<20} {'YES' if r['needs_bypass'] else 'NO':<8}")
+        print(f"{r['character_index']:<4} {r['character_name']:<20} {str(r['expected']):<12} {str(r['got_back']):<20.20} {'YES' if r['needs_bypass'] else 'NO':<8}")
     print()
 
     print("=" * 80)
@@ -458,6 +509,7 @@ def main():
             "failed_count": len(failed),
             "all_passed": len(failed) == 0,
             "results": results,
+            "attribution_quote": attribution_quote,
         }, f, indent=2, ensure_ascii=False)
     print(f"\n💾 Analysis saved to: {out_file}")
 

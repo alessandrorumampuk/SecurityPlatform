@@ -1,5 +1,23 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Runtime output — all scan results live here, never commit
 log/
+
+# Browser automation artifacts
 .browser_profile/
+**/playwright-report/
+
+# Debug dumps produced by skills (e.g. social_media_crawler)
+debug_html_*.html
+
+# Local environment overrides (commit .env.example, not real .env)
+.env.local

@@ -260,8 +260,8 @@ def scan_csrf(host, stem):
 
 
 def scan_blh(host, stem, max_pages):
-    """social_media_crawler mines social links on the host, then each
-    platform checker's verdict decides BLH (same oracle as vvm)."""
+    """social_media_crawler mines social links on the host; findings
+    are the discovered links themselves (no platform checkers run)."""
     origin = f"https://{host}/"
     crawl_j = stem + "-blh-social.json"
     say(f"  [blh] mining social links on {origin} "
@@ -275,40 +275,13 @@ def scan_blh(host, stem, max_pages):
     for platform, entries in (data.get("social_media") or {}).items():
         for e in entries:
             url = e.get("url", "") if isinstance(e, dict) else str(e)
-            link_host = (urllib.parse.urlsplit(url).hostname or "")
-            link_host = link_host.lower().lstrip("www.")
-            plat = next((v for k, v in _BLH_CHECKERS.items()
-                         if link_host == k
-                         or link_host.endswith("." + k)), None)
-            if not plat or url in done:
+            if not url or url in done:
                 continue
             done.add(url)
-            say(f"  [blh:{plat}] profile check {url}")
-            script = BLH_DIR / f"open_{plat}_playwright.py"
-            out, t0, rc = _skill_run(script, url, timeout=300)
-            rep = _log_since(f"broken_link_hijacking_{plat}_verify", t0)
-            res = (rep or {}).get("results", [{}])[0]
-            if not res:
-                finds.append(dict(
-                    vuln="Broken Link Hijacking", status="candidate",
-                    path=["page:" + origin], tool="broken_link_hijacking",
-                    evidence=(f"{url} -- checker unavailable "
-                              f"(rc={rc}; login may be required)")))
-            elif res.get("exists") is False and _evaluated(res):
-                finds.append(dict(
-                    vuln="Broken Link Hijacking", status="verified",
-                    path=["page:" + origin], tool="broken_link_hijacking",
-                    evidence=(f"{url} -- platform checker evaluated page: "
-                              f"profile not found "
-                              f"(status={res.get('status')})")))
-            elif res.get("exists") is True:
-                continue  # profile exists -> not hijackable, drop
-            else:
-                finds.append(dict(
-                    vuln="Broken Link Hijacking", status="candidate",
-                    path=["page:" + origin], tool="broken_link_hijacking",
-                    evidence=(f"{url} -- checker status "
-                              f"{res.get('status')}; needs manual review")))
+            finds.append(dict(
+                vuln="Broken Link Hijacking", status="candidate",
+                path=["page:" + origin], tool="broken_link_hijacking",
+                evidence=f"{url} -- {platform} link found"))
     return finds
 
 
@@ -373,6 +346,85 @@ def main():
     stem = str(out_path)[:-5] if str(out_path).endswith(".json") \
         else str(out_path)
     t0 = time.time()
+
+    # -- blh-only fast path: social_media_crawler already enumerates
+    #    subdomains itself via crt.sh, so find_subdomains would only
+    #    duplicate the work. Run it once, as-is, on the start URL.
+    if set(only) == {"blh"}:
+        crawl_j = stem + "-blh-social.json"
+        say(f"[auto] blh only -> crawler enumerates + mines {host} itself")
+
+        def blh_partial(final=False):
+            """Merge the crawler's own autosave into the aggregate JSON so
+            the UI shows pages/links while the crawl is still running."""
+            data = _read_json(crawl_j) or {}
+            finds, seen = [], set()
+            host_pages = {host: 0}
+            for platform, entries in \
+                    (data.get("social_media") or {}).items():
+                for e in entries:
+                    url = e.get("url", "") if isinstance(e, dict) else str(e)
+                    on = (e.get("found_on") or []
+                          if isinstance(e, dict) else [])
+                    for p in on:
+                        h = urllib.parse.urlsplit(p).hostname
+                        if h:
+                            host_pages[h] = host_pages.get(h, 0) + 1
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
+                    h0 = (urllib.parse.urlsplit(on[0]).hostname
+                          if on else host) or host
+                    finds.append(dict(
+                        vuln="Broken Link Hijacking", status="candidate",
+                        path=["page:" + h0], tool="broken_link_hijacking",
+                        host=h0,
+                        evidence=f"{url} -- {platform} link found"))
+            st = "done" if final else "running"
+            targets = [{"host": h, "status": st, "verified": 0,
+                        "findings": sum(1 for f in finds
+                                        if f["host"] == h)}
+                       for h in sorted(host_pages)]
+            doc = {
+                "generated_by": "auto_hunt.py", "url": args.url,
+                "scanned_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "skills": only,
+                "subdomains_discovered": len(host_pages) - 1,
+                "hosts_scanned": len(targets),
+                "pages_crawled": data.get("pages_crawled", 0),
+                "elapsed_s": int(time.time() - t0),
+                "targets": targets, "findings": finds,
+                "blh_log": crawl_j}
+            if not final:
+                doc["partial"] = True
+            out_path.write_text(json.dumps(doc, indent=2))
+            return finds, targets
+
+        blh_partial()   # placeholder targets=running, findings=[]
+
+        # Poll the crawler's autosave file while it runs -- it writes every
+        # 10 pages, so the UI gets a fresh snapshot without waiting for
+        # the (potentially very long) full crawl to finish.
+        proc = subprocess.Popen(
+            [sys.executable, "-u",
+             str(BLH_DIR / "social_media_crawler.py"),
+             "--url", args.url, "--output", crawl_j],
+            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+            text=True)
+        try:
+            while proc.poll() is None:
+                time.sleep(15)
+                try:
+                    blh_partial()
+                except Exception:
+                    pass
+        except KeyboardInterrupt:
+            proc.terminate()
+            raise
+        blh_partial(final=True)
+        say(f"[auto] done -> {out_path} "
+            f"(crawler finished, exit={proc.returncode})")
+        return
 
     # -- Phase 1: subdomain_finder -> one JSON log -------------------------
     sub_json = stem + "-subdomains.json"
