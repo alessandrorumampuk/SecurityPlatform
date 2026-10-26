@@ -35,11 +35,14 @@ _KW = {
     "void", "instanceof", "yield", "await", "throw", "var", "let", "const",
     "function", "if", "while", "for", "switch", "with", "import", "extends",
 }
-# window.onerror-target properties assigned sink functions
+# window.onerror-target properties assigned sink functions (require throw)
 _SINK_PROPS = {
     "onerror", "onload", "onfocus", "onclick", "onmouseover", "onmessage",
-    "location", "href",
 }
+# Direct DOM HTML-parsing assignment sinks (fire without throw)
+_HTML_ASSIGN_SINKS = {"innerHTML", "outerHTML", "srcdoc"}
+# Navigation assignment sinks (fire without throw when RHS is javascript:)
+_NAV_ASSIGN_SINKS = {"location", "href"}
 
 
 def _skip_string(src, i):
@@ -195,17 +198,34 @@ def _lex(src, base, out):
                 i = j
                 last_atom = False
                 continue
-            if name in _SINK_PROPS:
-                # onerror = alert  /  location = 'javascript:…'
+            if name in _SINK_PROPS or name in _HTML_ASSIGN_SINKS \
+                    or name in _NAV_ASSIGN_SINKS:
+                # onerror = alert  /  el.innerHTML = '…'  /  location = 'javascript:…'
                 k = j
                 while k < n and src[k].isspace():
                     k += 1
-                if k < n and src[k] == "=":
+                if k < n and src[k] == "=" and src[k:k + 2] != "==":
                     k += 1
                     while k < n and src[k].isspace():
                         k += 1
                     rhs = _IDENT_RE.match(src, k)
-                    if rhs or src[k:k + 1] in "'\"`":
+                    if name in _HTML_ASSIGN_SINKS and (
+                            rhs or src[k:k + 1] in "'\"`"):
+                        out.setdefault("sink_assigns", []).append(
+                            (base + i, base + k))
+                        i = k
+                        last_atom = False
+                        continue
+                    if name in _NAV_ASSIGN_SINKS and src[k:k + 1] in "'\"`" \
+                            and re.match(r"""['"`]\s*javascript:""",
+                                         src[k:], re.I):
+                        out.setdefault("sink_assigns", []).append(
+                            (base + i, base + k))
+                        i = k
+                        last_atom = False
+                        continue
+                    if name in _SINK_PROPS and (
+                            rhs or src[k:k + 1] in "'\"`"):
                         out["assigns"].append((base + i, base + k))
                         i = k
                         last_atom = False
@@ -251,8 +271,9 @@ def _lex(src, base, out):
 
 
 def lex_js(src):
-    """Return {'strings','calls','assigns','throws'} span lists for src."""
-    out = {"strings": [], "calls": [], "assigns": [], "throws": []}
+    """Return {'strings','calls','assigns','throws','sink_assigns'} span lists."""
+    out = {"strings": [], "calls": [], "assigns": [], "throws": [],
+           "sink_assigns": []}
     _lex(src, 0, out)
     return out
 
@@ -270,31 +291,47 @@ def _hits_in_range(s, e, spans):
     return calls, assigns, throws
 
 
+def _sink_assigns_in_range(s, e, spans):
+    return [a for a in spans.get("sink_assigns", [])
+            if s <= a[0] and a[1] <= e]
+
+
 def payload_hits_call(src, payload):
     """True if ANY verbatim occurrence of payload in src produces a live
     call — i.e. not strictly inside a string literal AND containing a call
-    span or an assign+throw pair. Mirrors Dalfox payload_range_hits_sink."""
+    span, a direct DOM/nav sink assignment, or an assign+throw pair.
+    Mirrors Dalfox payload_range_hits_sink."""
     if not payload:
         return False, ""
     spans = lex_js(src)
-    start = 0
+    candidates = [payload]
+    if '\\"' in payload or "\\'" in payload:
+        exp_esc = payload.replace('\\"', '\\\\"').replace("\\'", "\\\\'")
+        if exp_esc != payload:
+            candidates.append(exp_esc)
     found = False
-    while True:
-        idx = src.find(payload, start)
-        if idx < 0:
-            break
-        start = idx + 1
-        s, e = idx, idx + len(payload)
-        if _strictly_inside(s, e, spans["strings"]):
-            continue  # trapped inside a string literal — dead
-        found = True
-        calls, assigns, throws = _hits_in_range(s, e, spans)
-        if calls:
-            cs, ce = calls[0]
-            return True, f"call survived: {src[cs:ce]}…"
-        if assigns and throws:
-            a = assigns[0]
-            return True, f"sink assignment + throw: {src[a[0]:a[1]]}"
+    for cand in candidates:
+        start = 0
+        while True:
+            idx = src.find(cand, start)
+            if idx < 0:
+                break
+            start = idx + 1
+            s, e = idx, idx + len(cand)
+            if _strictly_inside(s, e, spans["strings"]):
+                continue  # trapped inside a string literal — dead
+            found = True
+            calls, assigns, throws = _hits_in_range(s, e, spans)
+            if calls:
+                cs, ce = calls[0]
+                return True, f"call survived: {src[cs:ce]}…"
+            sinks = _sink_assigns_in_range(s, e, spans)
+            if sinks:
+                sa = sinks[0]
+                return True, f"DOM/nav sink assignment survived: {src[sa[0]:sa[1]]}"
+            if assigns and throws:
+                a = assigns[0]
+                return True, f"sink assignment + throw: {src[a[0]:a[1]]}"
     if not found:
         return None, "payload not reflected verbatim"
     return False, "payload reflected but no surviving call"
@@ -311,10 +348,17 @@ def payload_live_in_js(src, needle, marker=None):
         return False, "payload not reflected"
     spans = lex_js(src)
     pos = src.find(marker)
-    s = max(0, pos - len(needle))
+    s = max(0, pos - len(needle) - 4)
     calls, assigns, throws = _hits_in_range(s, pos + len(marker), spans)
     if calls:
         return True, f"call survived (stripped payload): {src[calls[0][0]:calls[0][1]]}…"
+    sinks = _sink_assigns_in_range(s, pos + len(marker), spans)
+    if sinks:
+        sa = sinks[0]
+        return True, f"DOM/nav sink assignment survived: {src[sa[0]:sa[1]]}"
+    if assigns and throws:
+        a = assigns[0]
+        return True, f"sink assignment + throw: {src[a[0]:a[1]]}"
     return False, "marker reflected but executable core stripped"
 
 
@@ -322,7 +366,9 @@ def extract_intended_js(payload):
     """Pull the JS fragment our payload intended to run, for attr/URL checks:
     on*=<js>  ->  handler body;  javascript:<js> -> after scheme; else the
     whole payload (js_string/js_raw breakouts are JS themselves)."""
-    m = re.search(r"on\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", payload)
+    m = re.search(
+        r"on\w+\s*=\s*(\"[^\"]*\"|'[^']*'|\"[^\"]*$|'[^']*$|[^\s>]+)",
+        payload)
     if m:
         return m.group(1).strip("'\"")
     m = re.search(r"(?:javascript|data)\s*:\s*(.{1,200})", payload, re.I | re.S)

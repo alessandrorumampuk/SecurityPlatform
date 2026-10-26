@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 import urllib.parse
 import urllib.request
@@ -298,6 +299,57 @@ def find_surface(url, timeout=15):
     return targets, post_forms, {"postmessage": postmsg, "sinks": sinks}
 
 
+# Curated high-signal parameter names for bucketed hidden-parameter mining
+COMMON_PARAMS = [
+    "q", "s", "search", "query", "keyword", "keywords", "id", "page",
+    "url", "redirect", "next", "return", "returnUrl", "callback", "cb",
+    "jsonp", "name", "user", "username", "msg", "message", "error", "err",
+    "title", "text", "body", "content", "html", "data", "input", "val",
+    "value", "view", "template", "tpl", "file", "path", "folder", "dir",
+    "lang", "locale", "type", "cat", "category", "sort", "order", "filter",
+    "ref", "source", "src", "dest", "target", "action", "cmd", "debug",
+    "test", "echo", "tag", "term", "token", "code", "email", "key", "item",
+    "out", "format", "style", "theme", "color", "label", "comment", "note",
+]
+
+
+def mine_hidden_params(url, existing_params=None, bucket_size=36, timeout=10):
+    """Bucketed query-parameter miner (Dalfox/Param-Miner pattern):
+    packs `bucket_size` candidate names into a single GET request with a
+    unique canary per name (O(N/B) requests instead of O(N)), and collapses
+    buckets where >3 canaries echo together (whole-query-string reflection
+    like canonical links) into a single representative parameter."""
+    existing = set(existing_params or ())
+    u_base = urllib.parse.urlsplit(url)
+    base_nf = urllib.parse.urlunsplit(u_base._replace(fragment=""))
+    joiner = "&" if u_base.query else "?"
+    cands = [p for p in COMMON_PARAMS if p not in existing]
+    discovered = []
+    for i in range(0, len(cands), bucket_size):
+        chunk = cands[i:i + bucket_size]
+        canaries = [(p, f"vvmc{secrets.token_hex(3)}{idx:02d}")
+                    for idx, p in enumerate(chunk)]
+        qs = "&".join(f"{p}={c}" for p, c in canaries)
+        probe_url = f"{base_nf}{joiner}{qs}"
+        try:
+            req = urllib.request.Request(probe_url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        hits = [p for p, c in canaries if c in body]
+        if len(hits) > 3:
+            # Whole query string echoed (e.g. canonical link); keep 1 representative
+            hits = hits[:1]
+        for p in hits:
+            discovered.append({
+                "type": "mined_param",
+                "template": f"{base_nf}{joiner}{p}={PLACEHOLDER}",
+                "param": p,
+            })
+    return discovered
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Discover XSS attack surface (injectable parameters)")
@@ -306,9 +358,21 @@ def main():
                                   "(also logged under Skills/log)")
     ap.add_argument("--max", type=int, default=0,
                     help="Cap number of targets (0 = no cap)")
+    ap.add_argument("--mine", action="store_true",
+                    help="Bucket-probe common hidden query parameters "
+                         "(also runs automatically when 0 visible params "
+                         "are found on the page)")
     args = ap.parse_args()
 
     targets, post_forms, extras = find_surface(args.url)
+    if args.mine or not targets:
+        known = {t["param"] for t in targets}
+        mined = mine_hidden_params(args.url, existing_params=known)
+        seen_tpls = {t["template"] for t in targets}
+        for mt in mined:
+            if mt["template"] not in seen_tpls:
+                seen_tpls.add(mt["template"])
+                targets.append(mt)
     if args.max:
         targets = targets[:args.max]
 

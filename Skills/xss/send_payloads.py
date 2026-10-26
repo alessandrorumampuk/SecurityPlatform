@@ -9,13 +9,35 @@ import json
 import argparse
 import sys
 import base64
+import time
 from datetime import datetime
+
+try:
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    requests = None
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_HTTP_SESSION = None
+
+
+def _get_session():
+    global _HTTP_SESSION
+    if _HTTP_SESSION is None and requests is not None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": UA})
+        _HTTP_SESSION = s
+    return _HTTP_SESSION
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from log_utils import new_log_path
 
 MARKER_START = "testing1"
 MARKER_END = "testing2"
+NUMERIC_PROBE_MARKER = "90197752"
 SEPARATOR = "x"          # legacy only — see make_boundaries()
 PLACEHOLDER = "{xss_testing}"
 
@@ -86,6 +108,7 @@ KEYWORDS = [
     ("tick_alert", "alert`1`"),
     ("tick_confirm", "confirm`1`"),
     ("tick_prompt", "prompt`1`"),
+    ("tick_print", "print`1`"),
     ("pair_img_onerror", "img onerror"),
     ("pair_svg_onload", "svg onload"),
     ("pair_details_ontoggle", "details ontoggle"),
@@ -105,6 +128,7 @@ KEYWORDS = [
     ("case_onload", "OnLoAd"),
     ("case_proto", "JaVaScRiPt:"),
     # context-syntax probes for comment/template-literal escapes
+    ("space", " "),
     ("newline", "\n"),
     ("comment_close", "*/"),
     ("interp", "${"),
@@ -112,6 +136,11 @@ KEYWORDS = [
     # hex/padded/no-semicolon spellings of the same reference
     ("hex_ref", "&#x65;"),
     ("nosemi_ref", "&#x65"),
+    # multi-decode & Unicode NFKC normalization probes:
+    # '%3c' is sent as '%253c' on the wire -> returns '<' if double-decoded;
+    # '\uff1c' ('＜') returns '<' if NFKC-normalized after the WAF/filter.
+    ("double_url_lt", "%3c"),
+    ("fullwidth_lt", "\uff1c"),
 ]
 
 
@@ -164,12 +193,21 @@ def keyword_items():
     return items
 
 
-def send_curl_meta(url):
-    """(body, http_status) — status appended via -w, split off the last
-    line; '000' when the request never produced one."""
+def _send_once(url):
+    sess = _get_session()
+    if sess is not None:
+        try:
+            req = requests.Request("GET", url)
+            prep = sess.prepare_request(req)
+            prep.url = url  # preserve exact percent-encoding on the wire
+            resp = sess.send(prep, verify=False, allow_redirects=False,
+                             timeout=10)
+            return resp.text, str(resp.status_code)
+        except Exception:
+            pass
     try:
         result = subprocess.run(
-            ["curl", "-s", "-k", "--max-time", "10",
+            ["curl", "-s", "-k", "--max-time", "10", "-A", UA,
              "-w", "\n%{http_code}", url],
             capture_output=True,
             text=True,
@@ -180,6 +218,21 @@ def send_curl_meta(url):
         return body, code.strip() or "000"
     except Exception as e:
         return f"[CURL_ERROR] {e}", "000"
+
+
+def send_curl_meta(url):
+    """(body, http_status) — uses a persistent requests.Session (TCP
+    keep-alive, uniform Chrome UA, exact wire URL without re-quoting) and
+    retries transient 429/503 rate-limit responses with exponential
+    backoff + jitter."""
+    body, status = _send_once(url)
+    for attempt in range(3):
+        if status not in ("429", "503"):
+            break
+        delay = min(4.0, 0.3 * (2 ** attempt)) + (secrets.randbelow(200) / 1000.0)
+        time.sleep(delay)
+        body, status = _send_once(url)
+    return body, status
 
 
 def send_curl(url):
@@ -207,7 +260,10 @@ def _extract_indexed(seg, seps, n):
 def _bisect(target_url, items, out, budget):
     """Request-level block attribution: a deny page carries no markers,
     so recursively halve the item set — a sub-probe that reflects proves
-    its items survive; one that still blocks narrows the offender."""
+    its items survive; one that still blocks narrows the offender.
+    Distinguishes content blocks (403/406) from rate-limits (429/503):
+    429/503 triggers exponential backoff + jitter and retries without
+    burning the bisect budget."""
     if not items:
         return
     if budget[0] <= 0:
@@ -218,6 +274,12 @@ def _bisect(target_url, items, out, budget):
     url = target_url.replace(PLACEHOLDER,
                              urllib.parse.quote(s, safe=""))
     body, status = send_curl_meta(url)
+    for attempt in range(3):
+        if status not in ("429", "503"):
+            break
+        delay = min(4.0, 0.3 * (2 ** attempt)) + (secrets.randbelow(200) / 1000.0)
+        time.sleep(delay)
+        body, status = send_curl_meta(url)
     budget[0] -= 1
     m = re.search(re.escape(MARKER_START) + r"(.*?)" +
                   re.escape(MARKER_END), body, re.DOTALL)
@@ -228,6 +290,11 @@ def _bisect(target_url, items, out, budget):
                         "verdict": "passed" if got == v
                                    else "indeterminate" if got is None
                                    else "transformed"})
+        return
+    if status in ("429", "503"):
+        out += [{"name": n, "expected": v, "got": None,
+                 "verdict": "unresolved", "status": status}
+                for n, v in items]
         return
     if len(items) == 1:
         out.append({"name": items[0][0], "expected": items[0][1],
@@ -385,39 +452,94 @@ def send_probe(target_url, items, vuln_name, kind, render=False):
         f.write(response)
     print(f"Saved: {html_file}\n")
 
-    if not render and MARKER_START not in response:
-        # Request-level block: a deny page carries no markers, so this
-        # response alone can't say WHICH item caused it. Baseline first —
-        # a bare marker that reflects proves the surface is alive and an
-        # item triggered the block; then bisect to attribute it.
-        print("[ANOMALY] No markers in response — possible request-level "
-              "block (deny page). Checking baseline reflection…")
+    full_match = re.search(
+        re.escape(MARKER_START) + r"(.*?)" + re.escape(MARKER_END),
+        response, re.DOTALL)
+    if not render and not full_match:
+        # Request-level block OR mid-stream truncation/die(): either
+        # MARKER_START is missing entirely, or MARKER_START reflected
+        # without MARKER_END (length cap / mid-page die()). Recover any
+        # leading items whose indexed boundaries survived before the cut,
+        # check baseline reflection, and bisect only the remaining tail.
+        pre_verdicts = []
+        tail_items = list(items)
+        max_len = None
+        p_start = response.find(MARKER_START + seps[0]) if seps else -1
+        if p_start >= 0:
+            seg = response[p_start + len(MARKER_START):]
+            bpos = [seg.find(b) for b in seps]
+            k = 0
+            for i in range(len(items)):
+                if bpos[i] >= 0 and bpos[i + 1] > bpos[i]:
+                    got = seg[bpos[i] + len(seps[i]):bpos[i + 1]]
+                    n, v = items[i]
+                    pre_verdicts.append({
+                        "name": n, "expected": v, "got": got,
+                        "verdict": "passed" if got == v else "transformed",
+                    })
+                    k = i + 1
+                else:
+                    break
+            if k > 0:
+                tail_items = list(items[k:])
+                max_len = len(MARKER_START) + bpos[k] + len(seps[k])
+                print(f"[ANOMALY] Partial reflection (MARKER_END missing) — "
+                      f"recovered {k}/{len(items)} leading item(s) "
+                      f"(~{max_len} chars before cut).")
+        if not pre_verdicts:
+            print("[ANOMALY] No complete markers in response — possible "
+                  "request-level block (deny page) or truncation. Checking "
+                  "baseline reflection…")
         base = MARKER_START + secrets.token_hex(4) + MARKER_END
         burl = target_url.replace(PLACEHOLDER,
                                   urllib.parse.quote(base, safe=""))
         bbody, bstatus = send_curl_meta(burl)
+        base_ok = bool(re.search(
+            re.escape(MARKER_START) + r".*?" + re.escape(MARKER_END),
+            bbody, re.DOTALL))
         attrib = {"generated_by": "send_payloads.py",
                   "generated_at": datetime.now().isoformat(),
                   "url": target_url, "kind": kind,
                   "http_status": http_status,
                   "baseline_status": bstatus,
-                  "baseline_reflects": MARKER_START in bbody,
+                  "baseline_reflects": base_ok,
                   "baseline_marker": base,
-                  "baseline_body": bbody}
-        if attrib["baseline_reflects"]:
-            print("          baseline reflects -> bisecting items to "
-                  "attribute the block…")
-            verdicts, budget = [], [len(items) + 16]
-            _bisect(target_url, items, verdicts, budget)
+                  "baseline_body": bbody,
+                  "max_len": max_len}
+        if base_ok or pre_verdicts:
+            verdicts = list(pre_verdicts)
+            if tail_items:
+                print(f"          bisecting {len(tail_items)} remaining "
+                      f"item(s)…")
+                max_b = 2 * len(tail_items) + 16
+                budget = [max_b]
+                _bisect(target_url, tail_items, verdicts, budget)
+                used_reqs = max_b - budget[0]
+            else:
+                used_reqs = 0
             blocked = [v["name"] for v in verdicts
                        if v["verdict"] == "blocked"]
             attrib["verdicts"] = verdicts
             print(f"          blocked: {blocked or 'none'} "
-                  f"({len(items) + 16 - budget[0]} probe requests)")
+                  f"({used_reqs} probe requests)")
         else:
             attrib["verdicts"] = []
-            print("          baseline does NOT reflect -> dead surface / "
-                  "blanket block; per-item attribution impossible")
+            # Numeric fallback probe (Dalfox NUMERIC_PROBE_MARKER): distinguish
+            # "dead surface" from a letter-stripping filter (gsub(/[a-zA-Z]/, '')).
+            nurl = target_url.replace(PLACEHOLDER, NUMERIC_PROBE_MARKER)
+            nbody, nstatus = send_curl_meta(nurl)
+            num_ok = (NUMERIC_PROBE_MARKER in nbody
+                      and NUMERIC_PROBE_MARKER not in bbody)
+            attrib["numeric_reflects"] = num_ok
+            attrib["numeric_status"] = nstatus
+            if num_ok:
+                attrib["baseline_body"] = nbody
+                attrib["baseline_marker"] = NUMERIC_PROBE_MARKER
+                print(f"          numeric probe ({NUMERIC_PROBE_MARKER}) "
+                      f"REFLECTS -> letter-stripping filter detected!")
+            else:
+                print("          baseline does NOT reflect -> dead surface / "
+                      "blanket block; per-item attribution impossible")
         apath = html_file.replace(".html", "_attribution.json")
         with open(apath, "w") as f:
             json.dump(attrib, f, indent=2, ensure_ascii=False)

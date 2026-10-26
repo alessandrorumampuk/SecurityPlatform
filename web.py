@@ -337,11 +337,14 @@ def _xss_trace(t0):
                           "d": html_meta(hp).get("input_sent", "")})
         if ra:
             d = json.loads(ra.read_text(encoding="utf-8", errors="replace"))
+            r_list = d.get("results", [])
+            first_rid = (r_list[0].get("reflection_index", 1)
+                         if r_list else 1)
             items = [
                 {"n": r.get("character_name"), "e": r.get("expected"),
                  "g": r.get("got_back"), "ok": bool(r.get("passed"))}
-                for r in d.get("results", [])
-                if r.get("reflection_index") == 1]
+                for r in r_list
+                if r.get("reflection_index") == first_rid]
             steps.append({"t": "Char verdicts — what the filter did",
                           "items": items})
         # 3-4. keyword probe + mask
