@@ -65,14 +65,16 @@ it is pruned before emission — no dead candidates, no wasted requests.
 
 ## Files
 
-| File | Role |
+| File / Module | Role |
 |---|---|
-| `find_surface.py` | Attack-surface discovery: one `{xss_testing}` template per injectable param (page URL params, same-host query links, GET-form fields). POST forms reported as stored surface. |
-| `send_payloads.py` | Sends marker probes. `--probe2` adds the 46-item keyword/junction probe; `--isolate` sends 6 single-character requests. |
-| `check_reflection.py` | Parses the latest probe response: per-item PASS/FAIL, context detection, reflection positions, anomaly hints. `--keywords` analyzes the probe-2 file. |
-| `recommend_payload.py` | Deterministic payload recommender: breaker computation, char gate, keyword/junction gates, composition grammar, marker verification. |
+| `find_surface.py` | Attack-surface discovery CLI: one `{xss_testing}` template per injectable param (page URL params, same-host query links, embedded attrs, JSONP scripts, GET-form fields, DOM sources, bucketed param miner). |
+| `send_payloads.py` | Probe sender CLI: indexed-boundary char & keyword/junction probes (`--probe2`), WAF bisect attribution, numeric letter-stripper detection, per-char isolation (`--isolate`), and Playwright DOM sink capture (`--render`). |
+| `check_reflection.py` | Reflection analyzer CLI: per-item PASS/FAIL, HTML/JS context & structural closer detection, reflection positions, and anomaly/bisect/letter-stripper recovery. |
+| `recommend_payload.py` | Deterministic payload recommender CLI: breaker computation, char/keyword/junction gates, composition grammar, and multi-wave R/V marker verification. |
+| `js_verify.py` | Public facade for the dependency-free JS span lexer and call-survival verifier (`core/js_lexer.py`). |
+| `core/` | Modular engine package: `constants.py`, `types.py`, `transport.py`, `boundary.py`, `context.py`, `jsfuck.py` (dynamic non-alphanumeric JSFuck compiler), `obfuscators.py` (entity, unicode, bracket, and indirect-call junction bypasses), `composer.py` (context-dispatched grammar), `js_lexer.py`, and `verifier.py`. |
 | `skill.md` | The full AI-guided workflow document (manual routing, case library usage, edge-case handling). |
-| `case/` | 16 curated bypass technique files (`Payload:`/`Condition:`/`Case:`/`Output:`) — the authoritative fallback for unusual filters. |
+| `case/` | Curated bypass technique files (`Payload:`/`Condition:`/`Case:`/`Output:`) — the authoritative reference library. |
 
 All output goes to `Skills/log/` as timestamped files — never rely on
 terminal text alone.
