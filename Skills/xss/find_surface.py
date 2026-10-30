@@ -91,8 +91,9 @@ def find_surface(
                 "jsonp_param" if _CALLBACK_RE.match(key) else "script_param",
             )
 
-    # 3. GET form fields -> URL params; POST forms -> stored surface
+    # 3. GET form fields -> URL params; POST forms -> executable body surface
     post_forms: list[dict[str, Any]] = []
+    post_seen: set[tuple[str, str]] = set()
     for f in parser.forms:
         action = f["action"] or base
         u = urllib.parse.urljoin(base, action)
@@ -105,7 +106,35 @@ def find_surface(
                 tpl = u.split("?")[0] + f"?{name}={PLACEHOLDER}"
                 push(tpl, name, "get_form")
         else:
+            defaults = f.get("all_fields") or {}
             post_forms.append({"action": u, "fields": f["fields"]})
+            for name in f["fields"]:
+                # One body template per injectable field: the target field
+                # holds {xss_testing}, siblings keep their collected value
+                # (csrf/hidden fields) or a benign filler.
+                parts = [f"{name}={PLACEHOLDER}"] + [
+                    f"{n}={urllib.parse.quote(v or 'x', safe='')}"
+                    for n, v in defaults.items()
+                    if n != name
+                ]
+                data = "&".join(parts)
+                if (u, name) in post_seen:
+                    continue
+                post_seen.add((u, name))
+                targets.append(
+                    {
+                        "type": "post_form",
+                        "template": u,
+                        "param": name,
+                        "method": "POST",
+                        "data": data,
+                        "content_type": "application/x-www-form-urlencoded",
+                        # A real browser form submission percent-encodes
+                        # every value — without it, `&`/`=` inside the probe
+                        # would corrupt the urlencoded body structure.
+                        "body_encode": "url",
+                    }
+                )
 
     # 4. DOM-source params inside inline and same-host external scripts
     script_texts = list(parser.scripts)

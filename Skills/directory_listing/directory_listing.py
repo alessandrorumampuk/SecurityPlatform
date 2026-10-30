@@ -289,7 +289,7 @@ def _norm(name):
     return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
-def match_sensitive(name):
+def match_sensitive(name, indonesian=True):
     """Return the matched keyword(s) for a filename, or [].
 
     Keywords are normalized the same way as filenames, so ".env" or
@@ -299,27 +299,34 @@ def match_sensitive(name):
       2. concat prefix/suffix match (ktp in "alessandroktp.png",
          guarded by _CONCAT_DENY so "simple" doesn't hit "sim")
       3. squashed phrase substring  ("kartu keluarga" -> kartukeluarga
-         matches "kartukeluarga2020.jpg")"""
+         matches "kartukeluarga2020.jpg")
+
+    indonesian=False restricts matching to the _GENERIC_* sets: for
+    non-.id targets the Indonesian document vocabulary (KTP, NPWP,
+    bansos, ...) only costs matching time and risks false positives."""
     n = _norm(html.unescape(urllib.parse.unquote(name)))
     toks = set(n.split())
     sq = n.replace(" ", "")
     hits = []
-    for kw in _ID_TOKENS | _GENERIC_TOKENS | set(_ID_PHRASES) | \
-            set(_GENERIC_PHRASES):
+    kws = _GENERIC_TOKENS | set(_GENERIC_PHRASES)
+    if indonesian:
+        kws |= _ID_TOKENS | set(_ID_PHRASES)
+    for kw in kws:
         nk = _norm(kw)
         if " " in nk:
             if nk in n or nk.replace(" ", "") in sq:
                 hits.append(kw)
         elif nk in toks:
             hits.append(kw)
-    for kw in _CONCAT_TOKENS:
-        if kw in hits:
-            continue
-        for t in toks:
-            if t != kw and len(t) > len(kw) and t not in _CONCAT_DENY \
-                    and (t.startswith(kw) or t.endswith(kw)):
-                hits.append(kw)
-                break
+    if indonesian:
+        for kw in _CONCAT_TOKENS:
+            if kw in hits:
+                continue
+            for t in toks:
+                if t != kw and len(t) > len(kw) and t not in _CONCAT_DENY \
+                        and (t.startswith(kw) or t.endswith(kw)):
+                    hits.append(kw)
+                    break
     return sorted(set(hits))
 
 
@@ -395,7 +402,7 @@ def probe_propfind(url, timeout=10):
     return None
 
 
-def probe(base, path, timeout=10):
+def probe(base, path, timeout=10, indonesian=True):
     """GET base+path; return a record dict (is_listing when detected)."""
     url = base.rstrip("/") + path
     rec = {"path": path, "url": url, "status": 0, "method": "GET"}
@@ -434,10 +441,20 @@ def probe(base, path, timeout=10):
     entries = parse_entries(body, path)
     rec["file_count"] = len(entries)
     rec["entries"] = [e["name"] for e in entries][:200]
-    rec["sensitive"] = [{"name": e["name"], "match": match_sensitive(e["name"])}
-                        for e in entries
-                        if match_sensitive(e["name"])]
+    rec["sensitive"] = [
+        {"name": e["name"], "match": match_sensitive(e["name"], indonesian)}
+        for e in entries
+        if match_sensitive(e["name"], indonesian)]
     return rec
+
+
+def _is_id_domain(url):
+    """True when the target host sits under the .id ccTLD (go.id, co.id,
+    ac.id, or.id, sch.id, web.id, desa.id, bare .id, ...). Only those
+    targets plausibly host Indonesian-document filenames; anywhere else
+    the _ID_* vocabulary is wasted matching time."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+    return host == "id" or host.endswith(".id")
 
 
 def main():
@@ -448,15 +465,25 @@ def main():
                     help="Base URL, e.g. https://target.example")
     ap.add_argument("--delay", type=float, default=0.3)
     ap.add_argument("--timeout", type=int, default=10)
+    ap.add_argument("--sensitive", choices=("auto", "all", "generic"),
+                    default="auto",
+                    help="sensitive-filename matcher: auto = Indonesian "
+                         "vocabulary only under .id domains (default); "
+                         "all = always match it; generic = skip the "
+                         "_ID_* sets entirely (generic TLDs, faster)")
     ap.add_argument("--out", help="Output JSON (default: log dir)")
     args = ap.parse_args()
 
     base = args.url.rstrip("/")
+    indonesian = args.sensitive == "all" or (
+        args.sensitive == "auto" and _is_id_domain(base))
+    print(f"[dirlist] sensitive matcher: "
+          f"{'indonesian+generic' if indonesian else 'generic only'}")
     out = args.out or new_log_path("dirlist", "json")
 
     listings, probed = [], []
     for path in DIRS:
-        rec = probe(base, path, args.timeout)
+        rec = probe(base, path, args.timeout, indonesian)
         probed.append(rec)
         if rec.get("is_listing"):
             listings.append(rec)
@@ -473,6 +500,7 @@ def main():
     payload = {
         "generated_by": "directory_listing.py",
         "target": base,
+        "sensitive_matcher": "id+generic" if indonesian else "generic",
         "probed_at": datetime.now().isoformat(timespec="seconds"),
         "dirs_tested": len(probed),
         "listings": listings,

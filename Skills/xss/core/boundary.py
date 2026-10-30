@@ -125,8 +125,10 @@ def parse_html_meta(content: str) -> dict[str, str]:
     probe HTML log. Multiline-safe so the `newline` probe item inside
     `input_sent` does not break extraction."""
     meta: dict[str, str] = {}
-    # Only scan the metadata header prefix (up to first 4096 chars)
-    header_slice = content[:4096]
+    # Only scan the metadata header prefix. `items_json` grows with the
+    # keyword vocabulary and now runs past 4 KB, so allow 16 KB — still a
+    # bounded prefix far cheaper than scanning the whole response.
+    header_slice = content[:16384]
     for m in _META_COMMENT_RE.finditer(header_slice):
         key = m.group(1)
         if key not in meta:

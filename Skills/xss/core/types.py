@@ -8,6 +8,7 @@ composition state.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, TypedDict
 
 
@@ -55,6 +56,42 @@ class PayloadCandidate(TypedDict):
     technique: str
     case_ref: str
     efficiency: int
+
+
+@dataclass(slots=True)
+class RequestSpec:
+    """Describes *how* a payload reaches the target — not just the URL.
+
+    `url`, `data`, and `headers` values may each contain the `{xss_testing}`
+    placeholder; `core.transport.expand_spec` substitutes it with the correct
+    encoding for each location (URL -> percent-encoded, body/headers ->
+    verbatim by default).
+    """
+
+    method: str = "GET"
+    url: str = ""
+    data: str | None = None
+    content_type: str = "application/x-www-form-urlencoded"
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+_METHOD_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_-]{0,19}$")
+
+
+def normalize_method(raw: str | None, *, has_body: bool = False) -> str:
+    """Normalize a `--method` value into a valid HTTP token.
+
+    Defaults to POST when a request body is present, else GET. Arbitrary
+    verbs (PUT, PATCH, DELETE, OPTIONS, QUERY, ...) are allowed — only the
+    token grammar is validated so transport never receives a malformed
+    request line.
+    """
+    if not raw:
+        return "POST" if has_body else "GET"
+    m = raw.strip().upper()
+    if not _METHOD_TOKEN_RE.fullmatch(m):
+        raise ValueError(f"invalid HTTP method token: {raw!r}")
+    return m
 
 
 class VerificationResult(TypedDict):

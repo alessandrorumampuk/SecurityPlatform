@@ -93,14 +93,18 @@ from .obfuscators import (
     usable,
 )
 from .transport import (
+    expand_spec,
     fetch_rendered,
     fetch_url_with_base,
     get_http_session,
     parse_raw_http_response,
     send_curl,
     send_curl_meta,
+    send_spec,
     send_verify_request,
+    send_verify_spec,
 )
+from .types import RequestSpec, normalize_method
 from .verifier import (
     MarkerDomCheck,
     _core_payload,
@@ -132,6 +136,7 @@ __all__ = [
     "NUMERIC_PROBE_MARKER",
     "PLACEHOLDER",
     "RENDER_HOOK_JS",
+    "RequestSpec",
     "SEPARATOR",
     "SurfaceParser",
     "TAG_HANDLERS",
@@ -158,6 +163,7 @@ __all__ = [
     "entity_fname",
     "entity_variants",
     "escaped_quotes",
+    "expand_spec",
     "extract_indexed_items",
     "extract_intended_js",
     "extract_reflected_all",
@@ -175,6 +181,7 @@ __all__ = [
     "make_boundaries",
     "min_eff",
     "normalize_contexts",
+    "normalize_method",
     "param_templates",
     "parse_html_meta",
     "parse_raw_http_response",
@@ -187,7 +194,9 @@ __all__ = [
     "script_tag_executable",
     "send_curl",
     "send_curl_meta",
+    "send_spec",
     "send_verify_request",
+    "send_verify_spec",
     "split_by_separator",
     "split_str",
     "strip_html_comments",

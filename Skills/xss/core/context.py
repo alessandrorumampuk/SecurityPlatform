@@ -62,7 +62,7 @@ _EMBEDDED_TAGS: frozenset[str] = frozenset(
     }
 )
 _IGNORED_INPUT_TYPES: frozenset[str] = frozenset(
-    {"hidden", "submit", "button", "image", "reset"}
+    {"hidden", "submit", "button", "image", "reset", "file"}
 )
 
 
@@ -125,12 +125,18 @@ class SurfaceParser(HTMLParser):
                 "action": d.get("action", ""),
                 "method": (d.get("method") or "get").lower(),
                 "fields": [],
+                "all_fields": {},
             }
         elif self._form is not None and tag in ("input", "textarea", "select"):
             name = d.get("name")
             ftype = (d.get("type") or "text").lower()
-            if name and ftype not in _IGNORED_INPUT_TYPES:
-                self._form["fields"].append(name)
+            if name:
+                # Every named field is collected with its default value —
+                # hidden/csrf fields complete the form body but are not
+                # injection surfaces themselves.
+                self._form["all_fields"][name] = d.get("value") or ""
+                if ftype not in _IGNORED_INPUT_TYPES:
+                    self._form["fields"].append(name)
 
         if tag == "meta" and "refresh" in (d.get("http-equiv") or "").lower():
             m = _META_REFRESH_URL_RE.search(d.get("content") or "")

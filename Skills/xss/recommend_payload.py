@@ -63,6 +63,7 @@ from core.obfuscators import (  # noqa: E402
     usable,
 )
 from core.transport import get_http_session as _get_verify_session  # noqa: E402
+from core.types import RequestSpec, normalize_method  # noqa: E402
 from core.verifier import (  # noqa: E402
     MarkerDomCheck,
     _core_payload,
@@ -134,6 +135,43 @@ def main() -> None:
         type=int,
         default=3,
         help="max payload candidates per reflection (default 3)",
+    )
+    ap.add_argument(
+        "--method",
+        help="HTTP method for --verify — any verb: GET/POST/PUT/PATCH/"
+        "DELETE/OPTIONS/QUERY (default: GET, or POST when --data is "
+        "present)",
+    )
+    ap.add_argument(
+        "--data",
+        help=f"request body template containing {PLACEHOLDER} (for --verify "
+        "on POST/body surfaces)",
+    )
+    ap.add_argument(
+        "--content-type",
+        help="Content-Type for --data (default: "
+        "application/x-www-form-urlencoded)",
+    )
+    ap.add_argument(
+        "--data-urlencoded",
+        action="store_true",
+        help="percent-encode the payload inside --data during --verify "
+        "(default: verbatim)",
+    )
+    ap.add_argument(
+        "--json-escape",
+        action="store_true",
+        help="escape the payload as a JSON string literal inside --data "
+        "(default: raw)",
+    )
+    ap.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        default=[],
+        metavar="Name: Value",
+        help=f"custom request header (repeatable; value may contain "
+        f"{PLACEHOLDER})",
     )
     args = ap.parse_args()
 
@@ -293,15 +331,58 @@ def main() -> None:
         }
 
         if args.verify and cand:
-            if not args.url or PLACEHOLDER not in (args.url or ""):
-                print("    [!] --verify needs --url containing {xss_testing}")
+            custom_headers: dict[str, str] = {}
+            for h in args.header:
+                k, sep, v = h.partition(":")
+                if sep and k.strip():
+                    custom_headers[k.strip()] = v.strip()
+            content_type = (
+                args.content_type or "application/x-www-form-urlencoded"
+            )
+            try:
+                req_method = normalize_method(
+                    args.method, has_body=args.data is not None
+                )
+            except ValueError as e:
+                print(f"    [!] {e}")
+                req_method = "GET"
+            if req_method == "HEAD":
+                print(
+                    "    [!] HEAD responses carry no body — verify grades "
+                    "will be meaningless"
+                )
+            spec = RequestSpec(
+                method=req_method,
+                url=args.url or "",
+                data=args.data,
+                content_type=content_type,
+                headers=custom_headers,
+            )
+            has_ph = (
+                PLACEHOLDER in spec.url
+                or (spec.data is not None and PLACEHOLDER in spec.data)
+                or any(PLACEHOLDER in v for v in spec.headers.values())
+            )
+            if not has_ph:
+                print(
+                    "    [!] --verify needs {xss_testing} in --url, --data, "
+                    "or a -H header"
+                )
             else:
+                body_encode = (
+                    "json"
+                    if args.json_escape and "json" in content_type.lower()
+                    else "url"
+                    if args.data_urlencoded
+                    else "raw"
+                )
                 render = args.render or analysis.get("probe_mode") == "render"
                 print(
                     f"    verifying top payloads{render and ' (rendered DOM)' or ''}..."
                 )
                 verified = run_verification_waves(
-                    url=args.url,
+                    spec=spec,
+                    body_encode=body_encode,
                     initial_candidates=cand,
                     ctx=ctx,
                     quote_ch=quote_ch,

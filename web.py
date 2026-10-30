@@ -26,6 +26,8 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file
 
+from vrt_severity import grade_findings
+
 BASE = Path(__file__).resolve().parent
 OUT_DIR = BASE / "log" / "web"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,6 +100,15 @@ PAGE = """<!doctype html>
   .f .ev .vvm{color:#ff7b72;background:rgba(248,81,73,.13);border-radius:4px;
     padding:0 .3em;font-weight:700}
   .f .tool{color:#6e7681;font-size:.7rem}
+  .sev{display:inline-block;font-weight:700;font-size:.68rem;border-radius:5px;
+       padding:0 .45em;margin:0 4px 0 6px;vertical-align:1px;cursor:help}
+  .sev-P1{background:#f85149;color:#fff}
+  .sev-P2{background:#d29922;color:#0b0f14}
+  .sev-P3{background:#e3b341;color:#0b0f14}
+  .sev-P4{background:#388bfd;color:#fff}
+  .sev-P5{background:#6e7681;color:#fff}
+  .sev-VARIES,.sev-INFO{background:#21262d;color:#8b949e;
+       border:1px solid #30363d}
   .cand{opacity:.55;border-left-color:#d29922}
   .cand b{color:#d29922}
   .live{color:#d29922;font-style:italic;font-weight:400}
@@ -231,9 +242,18 @@ function renderResults(j,live){
     ).join('')+'</div>';
   }
   if(!finds.length)h+='<p class="empty">No verified vulnerabilities found.</p>';
+  else{
+    const sc={};finds.forEach(f=>{if(f.severity)sc[f.severity]=(sc[f.severity]||0)+1});
+    const tally=['P1','P2','P3','P4','P5','VARIES','INFO']
+      .filter(s=>sc[s]).map(s=>`<span class="sev sev-${s}">${s}</span>×${sc[s]}`).join(' ');
+    if(tally)h+='<div style="margin:.35em 0 .1em">'+tally+'</div>';
+  }
   finds.forEach(f=>{
+    const sev=f.severity?`<span class="sev sev-${esc(f.severity)}" title="${
+      esc((f.vrt&&f.vrt.name)||'')}${(f.vrt&&f.vrt.variant)?' — '+esc(f.vrt.variant):''}${
+      f.basis?'&#10;'+esc(f.basis):''}">${esc(f.severity)}</span>`:'';
     h+=`<div class="f ${f.status==='verified'?'':'cand'}">
-      <b>${esc(f.status).toUpperCase()}</b> — ${esc(f.vuln)}
+      <b>${esc(f.status).toUpperCase()}</b>${sev} — ${esc(f.vuln)}
       <span class="tool">[${esc(f.tool||'surface')}${f.host?' @ '+esc(f.host):''}]</span>
       <div class="ev">${hl(f.evidence||'')}</div></div>`;});
   F.innerHTML=h;
@@ -411,6 +431,16 @@ def _stage_from(line):
     return None
 
 
+def _present(findings):
+    """Grade each flat finding against the Bugcrowd VRT (vrt_severity.py)
+    and return the UI-facing projection -- verified first, then P1->P5."""
+    return [{"vuln": f.get("vuln"), "status": f.get("status"),
+             "evidence": f.get("evidence"), "tool": f.get("tool"),
+             "host": f.get("host"), "severity": f.get("severity"),
+             "vrt": f.get("vrt"), "basis": f.get("basis")}
+            for f in grade_findings(findings)]
+
+
 def _run_job(job, url, skills, mode="single", max_subs=0):
     """Single Shot: run vvm.py as a subprocess; stream stdout so the UI
     can show which stage/skill is currently running.
@@ -460,14 +490,10 @@ def _run_job(job, url, skills, mode="single", max_subs=0):
                                             errors="replace"))
         except Exception:
             pass
-    finds = graph.get("findings", [])
-    finds.sort(key=lambda f: f.get("status") != "verified")
     JOBS[job].update(
         status="done", image=png.name,
         xss_trace=_xss_trace(t0),
-        findings=[{"vuln": f.get("vuln"), "status": f.get("status"),
-                   "evidence": f.get("evidence"), "tool": f.get("tool")}
-                  for f in finds],
+        findings=_present(graph.get("findings", [])),
         elements=graph.get("meta", {}).get("elements", 0),
         nodes=len(graph.get("nodes", [])),
         edges=len(graph.get("edges", [])),
@@ -530,15 +556,11 @@ def _run_automation(job, url, skills, max_subs):
                          log=(data.get("finder_log") or "")[-2000:])
         return
 
-    finds = data.get("findings", [])
-    finds.sort(key=lambda f: f.get("status") != "verified")
     JOBS[job].update(
         status="done", image=None,
         xss_trace=_xss_trace(t0),
         targets=data.get("targets", []),
-        findings=[{"vuln": f.get("vuln"), "status": f.get("status"),
-                   "evidence": f.get("evidence"), "tool": f.get("tool"),
-                   "host": f.get("host")} for f in finds],
+        findings=_present(data.get("findings", [])),
         elements=data.get("subdomains_discovered", 0),
         nodes=data.get("hosts_scanned", 0), edges=0,
         elapsed=int(time.time() - t0))
@@ -587,11 +609,7 @@ def status(job):
             if live.get("targets"):
                 out["targets"] = live["targets"]
             if live.get("findings"):
-                out["findings"] = [
-                    {"vuln": f.get("vuln"), "status": f.get("status"),
-                     "evidence": f.get("evidence"), "tool": f.get("tool"),
-                     "host": f.get("host")}
-                    for f in live["findings"]]
+                out["findings"] = _present(live["findings"])
             if live.get("subdomains_discovered") is not None:
                 out["elements"] = live["subdomains_discovered"]
         except Exception:

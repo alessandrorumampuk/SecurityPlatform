@@ -590,17 +590,30 @@ def hunt_xss(page_url, stem, max_targets):
     _skill_run(XSS_DIR / "find_surface.py", "--url", page_url,
                "--out", surf_j, timeout=60)
     surf = _read_json(surf_j) or {}
-    targets = [t["template"] for t in surf.get("targets", [])]
+    targets = surf.get("targets", [])
     if surf.get("post_forms"):
         print(f"  [xss] {len(surf['post_forms'])} POST form(s) noted as "
               "stored-XSS surface (no stored oracle yet)")
 
     finds = []
-    for tpl in targets[:max_targets]:
+    for t in targets[:max_targets]:
+        tpl = t["template"] if isinstance(t, dict) else t
+        post_args = []
+        if isinstance(t, dict) and t.get("method") == "POST":
+            post_args = [
+                "--method", "POST",
+                "--data", t["data"],
+                "--content-type",
+                t.get("content_type", "application/x-www-form-urlencoded"),
+            ]
+            if t.get("body_encode") == "url":
+                post_args.append("--data-urlencoded")
+            elif t.get("body_encode") == "json":
+                post_args.append("--json-escape")
         print(f"  [xss] pipeline on {tpl[:90]}")
         t0 = time.time()
         _skill_run(XSS_DIR / "send_payloads.py", "--url", tpl, "--probe2",
-                   timeout=90)
+                   *post_args, timeout=90)
         t_chk = time.time()
         _skill_run(XSS_DIR / "check_reflection.py", timeout=60)
         _skill_run(XSS_DIR / "check_reflection.py", "--keywords", timeout=60)
@@ -616,22 +629,25 @@ def hunt_xss(page_url, stem, max_targets):
                    else "location.* source -> DOM sink plumbing in page")
             print(f"    [xss] {why} -> render probe (DOM sinks)")
             _skill_run(XSS_DIR / "send_payloads.py", "--url", tpl,
-                       "--probe2", "--render", timeout=150)
+                       "--probe2", "--render", *post_args, timeout=150)
             _skill_run(XSS_DIR / "check_reflection.py", timeout=60)
             _skill_run(XSS_DIR / "check_reflection.py", "--keywords",
                        timeout=60)
         _skill_run(XSS_DIR / "recommend_payload.py", "--top", "3",
-                   "--verify", "--url", tpl, timeout=240)
+                   "--verify", "--url", tpl, *post_args, timeout=240)
         rec = _log_since("xss_recommendation", t0)
         if not rec:
             continue
         for refl in rec.get("reflections", []):
             cands = refl.get("candidates", [])
             vers = refl.get("verification") or []
-            param = urllib.parse.parse_qs(
-                urllib.parse.urlsplit(tpl).query)
-            pname = next((k for k, v in param.items()
-                          if v and v[0] == "{xss_testing}"), "?")
+            if isinstance(t, dict) and t.get("param"):
+                pname = t["param"]
+            else:
+                param = urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(tpl).query)
+                pname = next((k for k, v in param.items()
+                              if v and v[0] == "{xss_testing}"), "?")
             for i, v in enumerate(vers):
                 grade = v.get("confidence")
                 if grade not in ("V", "R"):

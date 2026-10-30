@@ -96,6 +96,21 @@ KEYWORDS: list[tuple[str, str]] = [
     ("newline", "\n"),
     ("comment_close", "*/"),
     ("interp", "${"),
+    # Join-operator probes for the `{q} OP fn OP {q}` js-string family —
+    # a stripped operator leaves an unparseable `''fn''` composite, so each
+    # emitted variant must be gated on its operator's survival.
+    ("minus", "-"),
+    ("plus", "+"),
+    ("star", "*"),
+    ("pipe", "|"),
+    ("amp", "&"),
+    ("caret", "^"),
+    ("comma", ","),
+    ("bang", "!"),
+    ("eq", "="),
+    ("percent", "%"),
+    ("quest", "?"),
+    ("dot", "."),
     # Char-ref spelling variants
     ("hex_ref", "&#x65;"),
     ("nosemi_ref", "&#x65"),

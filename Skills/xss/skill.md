@@ -135,6 +135,46 @@ reflection surface" from "request rejected by WAF"), all 6 FAIL (could be a
 combination-triggered filter), or the `x` separator collapsed (split
 warning). Isolation pinpoints which single character trips the filter.
 
+**POST / body / header targets.** `{xss_testing}` may also live in a
+request body or header instead of the URL — `send_payloads.py` and
+`recommend_payload.py --verify` share the same flags:
+
+```bash
+# urlencoded POST form — body is substituted VERBATIM (curl --data /
+# Burp Repeater semantics), only the URL value is percent-encoded
+python3 send_payloads.py --url "https://example.com/comment" \
+  --data 'name={xss_testing}&msg=x' --probe2
+
+# browser-like form submit — percent-encode the payload inside the body
+python3 send_payloads.py --url "https://example.com/comment" \
+  --data 'name={xss_testing}&msg=x' --data-urlencoded --probe2
+
+# JSON body — raw (default) keeps `"` for string-breakout testing;
+# --json-escape escapes the payload as a JSON string literal
+python3 send_payloads.py --url "https://example.com/api" \
+  --data '{"q":"{xss_testing}"}' --content-type application/json --probe2
+
+# header injection — value substituted verbatim
+python3 send_payloads.py --url "https://example.com/" \
+  -H "Referer: https://x/?r={xss_testing}"
+```
+
+Rules: `--method` defaults to POST when `--data` is present (otherwise
+GET); `-H` is repeatable; verbatim body substitution means `&`/`=`/`+`
+inside a payload can split a urlencoded template — that split is itself
+observable fuzzing behaviour, use `--data-urlencoded` for clean
+browser-equivalent semantics. POST verification checks reflection in the
+POST response itself (no stored-XSS second-visit oracle). `--render` is
+GET-navigation only: on a POST target it logs `[RENDER_SKIP]` and falls
+back to the static path.
+
+`find_surface.py` emits one executable `post_form` target per injectable
+field — the target field carries `{xss_testing}`, all other fields
+(including hidden ones like `csrf_token`) are filled with their HTML
+default values, and the target is marked `body_encode: "url"` so the
+orchestrators pass `--data-urlencoded` automatically. Hidden fields are
+never scanned as standalone surfaces.
+
 ### Step 3: Analyze the reflection
 
 ```bash
@@ -350,9 +390,12 @@ ls -t Skills/log/*-xss_reflection_analysis.json | head -1
 - **The probe payload is non-destructive.** It only sends special characters
   wrapped in markers — no actual `<script>` tags. This is safe for initial
   probing. Only send actual XSS payloads after confirming reflection.
-- **URL-encode the payload.** `send_payloads.py` handles this automatically
-  via `urllib.parse.quote`. If testing manually, ensure special characters
-  are properly encoded in the URL.
+- **URL-encode the payload.** `send_payloads.py` handles URL substitution
+  automatically via `urllib.parse.quote`. Body (`--data`) and header
+  (`-H`) substitution is verbatim by default — opt into
+  `--data-urlencoded`/`--json-escape` when the template format needs it.
+  If testing manually, ensure special characters are properly encoded in
+  the URL.
 - **Check for multiple reflections.** The payload may appear more than once
   in the response (e.g. in both the page title and the body). Each
   reflection point may have different filtering — `check_reflection.py`

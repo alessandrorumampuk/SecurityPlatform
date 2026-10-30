@@ -90,9 +90,11 @@ cd Cybersecurity/Skills/xss
 python3 find_surface.py --url "http://127.0.0.1:8765/" --out surface.json
 ```
 
-Output: `targets[]` (page_param / link_param / get_form → templates) +
-`post_forms[]` (stored-XSS surface, enumerated but not executed — the
-pipeline is GET-only). vvm's `--hunt` mode consumes this file.
+Output: `targets[]` (page_param / link_param / get_form / **post_form** →
+templates). Each `post_form` target is executable: one entry per injectable
+field carrying `method`, `data` (field template `{xss_testing}` +
+default/hidden values such as `csrf_token`), `content_type`, and
+`body_encode`. vvm's `--hunt` mode consumes this file.
 
 ### Full pipeline (recommended)
 
@@ -110,6 +112,44 @@ python3 check_reflection.py --keywords
 python3 recommend_payload.py --verify \
   --url "http://127.0.0.1:8765/search?q={xss_testing}"
 ```
+
+### POST / JSON / header surfaces
+
+`send_payloads.py` and `recommend_payload.py --verify` accept a shared
+request spec — `{xss_testing}` may live in the URL, the body, or any `-H`
+header value:
+
+```bash
+# urlencoded POST form (verbatim body substitution, curl --data semantics)
+python3 send_payloads.py --url "http://127.0.0.1:8765/comment" \
+  --data 'name={xss_testing}&msg=x' --probe2
+
+# same, but percent-encode the payload like a real browser form submit
+python3 send_payloads.py --url "http://127.0.0.1:8765/comment" \
+  --data 'name={xss_testing}&msg=x' --data-urlencoded --probe2
+
+# JSON body — raw mode (default) lets `"` break out of the string;
+# --json-escape keeps the payload inside the JSON string literal
+python3 send_payloads.py --url "http://127.0.0.1:8765/api" \
+  --data '{"q":"{xss_testing}"}' --content-type application/json --probe2
+
+# header injection (verbatim)
+python3 send_payloads.py --url "http://127.0.0.1:8765/" \
+  -H "Referer: https://x/?r={xss_testing}"
+
+# verify side — identical flags
+python3 recommend_payload.py --verify \
+  --url "http://127.0.0.1:8765/comment" \
+  --data 'name={xss_testing}&msg=x' --data-urlencoded
+```
+
+Substitution rules: URL values are always `urllib.parse.quote(safe="")`;
+body and header values are verbatim by default (byte-on-the-wire, like Burp
+Repeater) unless `--data-urlencoded` / `--json-escape` is given.
+`--method` defaults to `POST` when `--data` is present, else `GET`.
+POST verification is static (same-response reflection); stored-XSS
+POST→GET oracles and POST browser rendering are out of scope — `--render`
+on a POST target degrades to the static path with a `[RENDER_SKIP]` notice.
 
 ### Escalation probe
 
@@ -253,7 +293,8 @@ ls -t ../log/*-xss_recommendation.json | head -1
 - Junction coverage is 2-tuples; deeper combinations (`src x onerror`,
   mutation + encoding) and base64/`atob` transforms stay in the case
   library's domain.
-- GET-only injection point (`{xss_testing}` in the URL); POST bodies and
-  stored/DOM XSS are out of scope.
+- `{xss_testing}` may live in the URL, a `--data` body template, or a `-H`
+  header. Stored-XSS POST→GET two-step verification, multipart bodies, and
+  POST browser rendering are still out of scope.
 - `V` grade ceiling: no real-browser execution proof by design (DalFox
   makes the same trade — headless verification is non-deterministic).

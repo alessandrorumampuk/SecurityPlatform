@@ -19,14 +19,16 @@ from typing import Any
 from urllib.parse import quote
 
 from .composer import compose
-from .constants import INERT_DOM_CONTAINERS, MARKER_TEMPLATE, PLACEHOLDER
+from .constants import INERT_DOM_CONTAINERS, MARKER_TEMPLATE
 from . import js_lexer as js_verify
 from .obfuscators import usable
 from .transport import (
+    expand_spec,
     fetch_rendered,
     parse_raw_http_response,
     send_verify_request,
 )
+from .types import RequestSpec
 
 _EXEC_SCHEME_RE = re.compile(r"\s*(javascript:|data:text|vbscript:)", re.I)
 _SRCDOC_EXEC_RE = re.compile(r"(on\w+=|<script|&lt;script|onerror)", re.I)
@@ -57,7 +59,9 @@ class MarkerDomCheck(HTMLParser):
         self._script_nonexec = False
         self._script_buf: str | None = None
         self._inert_tag: str | None = None
+        self._script_marker_el = False
         self.script_hits: list[str] = []
+        self.marker_scripts: list[str] = []
         self.attr_hits: list[tuple[str, str, str]] = []
         self.url_hits: list[tuple[str, str, str]] = []
 
@@ -87,6 +91,8 @@ class MarkerDomCheck(HTMLParser):
             )
         joined = " ".join(str(v or "") for v in d.values())
         has_marker = self.marker in joined or self.marker in "".join(d.keys())
+        if t_low == "script":
+            self._script_marker_el = has_marker
         if has_marker:
             for k, v in d.items():
                 if k.startswith("on"):
@@ -128,12 +134,12 @@ class MarkerDomCheck(HTMLParser):
         if self._inert_tag is not None:
             return
         if t_low == "script":
-            if (
-                self._script_buf
-                and self.marker in self._script_buf
-                and not self._script_nonexec
-            ):
-                self.script_hits.append(self._script_buf)
+            if self._script_buf and not self._script_nonexec:
+                if self._script_marker_el:
+                    self.marker_scripts.append(self._script_buf)
+                elif self.marker in self._script_buf:
+                    self.script_hits.append(self._script_buf)
+            self._script_marker_el = False
             self._in_script = False
             self._script_nonexec = False
             self._script_buf = None
@@ -233,39 +239,62 @@ def classify_response(
         )
         return {"payload": marked, "confidence": "R", "evidence": ev}
 
-    # 1. JS contexts: marker inside <script> body
-    if chk.script_hits:
-        needles = [marked, core] if style == "marker" else [needle]
-        mk = marker if style == "marker" else None
-        for script_text in chk.script_hits:
+    # Execution paths are a UNION: any one live path -> V; a category may
+    # only contribute a failure note, never an early `R`, so a reflection
+    # trapped inside a JS string cannot mask a live element elsewhere.
+    failures: list[str] = []
+
+    def _js_needles() -> list[str]:
+        intended = js_verify.extract_intended_js(core)
+        husk = _EMPTY_COMMENT_HUSK_RE.sub("", intended)
+        unesc = html_unescape(intended)
+        return (
+            [intended]
+            + ([husk] if husk != intended else [])
+            + ([unesc] if unesc != intended else [])
+        )
+
+    # 1. Marker carried by a <script> element itself — check its own body.
+    if chk.marker_scripts:
+        inner = re.sub(
+            r"(?is)^\s*<script[^>]*>|</script\s*>\s*$", "", core
+        ).strip()
+        # A payload may carry HTML around the script (`</textarea><script>…`),
+        # so stripping only leading/trailing tags leaves markup inside the
+        # needle and it can never match the script body. Extract each
+        # <script> body from the payload first, then fall back to `inner`.
+        frags = [
+            b.strip()
+            for _tag, b in js_verify.script_blocks(core)
+            if b.strip()
+        ] + [inner or core]
+        needles = list(
+            dict.fromkeys(
+                x
+                for f in frags
+                for x in (f, js_verify.extract_intended_js(f))
+                if x
+            )
+        )
+        for script_text in chk.marker_scripts:
             for nd in needles:
-                live, det = js_verify.payload_live_in_js(script_text, nd, mk)
+                live, det = js_verify.payload_live_in_js(
+                    script_text, nd, None
+                )
                 if live:
-                    ev = chk.evidence + " — " + det
                     return {
                         "payload": marked,
                         "confidence": "V",
-                        "evidence": ev + csp_note,
+                        "evidence": chk.evidence + " — " + det + csp_note,
                     }
-        return {
-            "payload": marked,
-            "confidence": "R",
-            "evidence": (
-                "marker in <script> but no surviving call — "
-                "executable core stripped or trapped"
-            ),
-        }
+        failures.append(
+            "marker <script> element created but executable body "
+            "stripped or trapped"
+        )
 
     # 2. Inline event-handler attributes (`on*=...`)
     if chk.attr_hits:
-        intended = js_verify.extract_intended_js(core)
-        husk = _EMPTY_COMMENT_HUSK_RE.sub("", intended)
-        unesc_intended = html_unescape(intended)
-        needles = (
-            [intended]
-            + ([husk] if husk != intended else [])
-            + ([unesc_intended] if unesc_intended != intended else [])
-        )
+        needles = _js_needles()
         mk = marker if style == "marker" else None
         for _tag, _attr, val in chk.attr_hits:
             uv = html_unescape(val)
@@ -283,24 +312,13 @@ def classify_response(
                         "confidence": "V",
                         "evidence": chk.evidence + " — " + det + csp_note,
                     }
-        return {
-            "payload": marked,
-            "confidence": "R",
-            "evidence": (
-                "marker element has on* handler but injected JS did not survive"
-            ),
-        }
+        failures.append(
+            "marker element has on* handler but injected JS did not survive"
+        )
 
     # 3. `javascript:` / `data:` URL attributes
     if chk.url_hits:
-        intended = js_verify.extract_intended_js(core)
-        husk = _EMPTY_COMMENT_HUSK_RE.sub("", intended)
-        unesc_intended = html_unescape(intended)
-        needles = (
-            [intended]
-            + ([husk] if husk != intended else [])
-            + ([unesc_intended] if unesc_intended != intended else [])
-        )
+        needles = _js_needles()
         mk = marker if style == "marker" else None
         for _tag, _attr, val in chk.url_hits:
             uv = html_unescape(val)
@@ -323,10 +341,34 @@ def classify_response(
                         + csp_note
                     ),
                 }
+        failures.append(
+            "executable URL attr but injected JS did not survive"
+        )
+
+    # 4. JS contexts: marker inside <script> body text
+    if chk.script_hits:
+        needles = [marked, core] if style == "marker" else [needle]
+        mk = marker if style == "marker" else None
+        for script_text in chk.script_hits:
+            for nd in needles:
+                live, det = js_verify.payload_live_in_js(script_text, nd, mk)
+                if live:
+                    ev = chk.evidence + " — " + det
+                    return {
+                        "payload": marked,
+                        "confidence": "V",
+                        "evidence": ev + csp_note,
+                    }
+        failures.append(
+            "marker in <script> but no surviving call — "
+            "executable core stripped or trapped"
+        )
+
+    if failures:
         return {
             "payload": marked,
             "confidence": "R",
-            "evidence": "executable URL attr but injected JS did not survive",
+            "evidence": "; ".join(failures),
         }
 
     return {
@@ -337,10 +379,11 @@ def classify_response(
 
 
 def verify_payload(
-    url: str,
+    spec: RequestSpec,
     payload: str,
     render: bool = False,
     comment_ok: bool = True,
+    body_encode: str = "raw",
 ) -> dict[str, str]:
     """Inject `payload` with a unique `vvm<6-alpha>` marker and grade `V` or `R`."""
     marker = "vvm" + "".join(
@@ -349,7 +392,15 @@ def verify_payload(
     marked = payload.replace(MARKER_TEMPLATE, marker)
     if "vvm" not in marked:
         marked += f"<!--{marker}-->" if comment_ok else f"/*{marker}*/"
-    target = url.replace(PLACEHOLDER, quote(marked, safe=""))
+    target, data, req_headers = expand_spec(
+        spec, marked, body_encode=body_encode
+    )
+    if spec.data is not None and data is not None:
+        req_headers = dict(req_headers)
+        req_headers.setdefault("Content-Type", spec.content_type)
+
+    if render and (spec.method.upper() != "GET" or data is not None):
+        render = False
 
     if render:
         try:
@@ -401,7 +452,13 @@ def verify_payload(
         return {"payload": marked, "confidence": "R", "evidence": ev}
 
     try:
-        status, headers, body = send_verify_request(target, timeout=15)
+        status, headers, body = send_verify_request(
+            target,
+            timeout=15,
+            method=spec.method,
+            data=data,
+            headers=req_headers,
+        )
     except Exception as e:
         return {"payload": marked, "confidence": "error", "evidence": str(e)}
     return classify_response(status, headers, body, payload, marker, marked)
@@ -431,7 +488,7 @@ def candidate_tier(cand: dict[str, Any]) -> int:
 
 
 def run_verification_waves(
-    url: str,
+    spec: RequestSpec,
     initial_candidates: list[dict[str, Any]],
     ctx: str,
     quote_ch: str,
@@ -447,6 +504,7 @@ def run_verification_waves(
     render: bool,
     dom_hint: bool,
     letter_stripper: bool = False,
+    body_encode: str = "raw",
 ) -> list[dict[str, str]]:
     """Execute adaptive multi-wave verification (`fn_cap = 2 -> 4 -> 8 -> 16`)
     followed by hybrid static-to-Playwright escalation when static verification
@@ -478,7 +536,11 @@ def run_verification_waves(
                 b_vers = list(
                     ex.map(
                         lambda p: verify_payload(
-                            url, p, render=False, comment_ok=comment_ok
+                            spec,
+                            p,
+                            render=False,
+                            comment_ok=comment_ok,
+                            body_encode=body_encode,
                         ),
                         batch,
                     )
@@ -492,7 +554,11 @@ def run_verification_waves(
         else:
             for p in batch:
                 v = verify_payload(
-                    url, p, render=render, comment_ok=comment_ok
+                    spec,
+                    p,
+                    render=render,
+                    comment_ok=comment_ok,
+                    body_encode=body_encode,
                 )
                 verified.append(v)
                 if v["confidence"] == "V":
@@ -528,7 +594,11 @@ def run_verification_waves(
         if has_r or dom_hint:
             for idx, c in enumerate(initial_candidates[:2]):
                 rv = verify_payload(
-                    url, c["payload"], render=True, comment_ok=comment_ok
+                    spec,
+                    c["payload"],
+                    render=True,
+                    comment_ok=comment_ok,
+                    body_encode=body_encode,
                 )
                 if rv["confidence"] == "V":
                     if idx < len(verified):
